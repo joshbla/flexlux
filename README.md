@@ -1,4 +1,5 @@
-# dimmer
-Dims your monitor naturally by darkening the screen: for when you wish to go below the lowest brightness of your monitor, or when you don't have brightness controls. 
+# FlexLux
+
+Adjust your monitor brightness through a simple taskbar app. Reach the maximum brightness for your monitor or dim your monitor below it's natural settings by artificially darkening the screen.
 
 Compatible with Windows 10 and 11.
