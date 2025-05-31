@@ -27,6 +27,7 @@ a = Analysis(
 )
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# Single-file executable for Windows and Linux
 exe = EXE(
     pyz,
     a.scripts,
@@ -49,3 +50,16 @@ exe = EXE(
     entitlements_file=None,
     icon='assets/icon.png' if os.path.exists('assets/icon.png') else None,
 )
+
+# Create .app bundle for macOS
+if sys.platform == 'darwin':
+    app = BUNDLE(
+        exe,
+        name='flexlux.app',
+        icon='assets/icon.png' if os.path.exists('assets/icon.png') else None,
+        bundle_identifier='com.flexlux.app',
+        info_plist={
+            'NSHighResolutionCapable': 'True',
+            'LSUIElement': '1',  # Hide from dock since it's a menu bar app
+        }
+    )
