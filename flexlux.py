@@ -10,13 +10,13 @@
 import sys
 import os
 import platform
-from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QSystemTrayIcon, QMenu, QAction
+from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel
 from PyQt5.QtGui import QIcon, QColor, QPainter, QCursor
 from PyQt5.QtCore import Qt, QRect, QEvent, QTimer
 import screen_brightness_control as sbc
 
 class OverlayWindow(QWidget):
-    def __init__(self):
+    def __init__(self, geometry=None):
         super().__init__()
         self.alpha = 0
         self.setAttribute(Qt.WA_NoSystemBackground)
@@ -31,15 +31,14 @@ class OverlayWindow(QWidget):
         else:  # Linux
             self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool | Qt.X11BypassWindowManagerHint)
         
-        # Get all screens for multi-monitor support
-        desktop = QApplication.desktop()
-        screen_count = desktop.screenCount()
-        total_rect = QRect()
+        if geometry is None:
+            desktop = QApplication.desktop()
+            total_rect = QRect()
+            for i in range(desktop.screenCount()):
+                total_rect = total_rect.united(desktop.screenGeometry(i))
+            geometry = total_rect
         
-        for i in range(screen_count):
-            total_rect = total_rect.united(desktop.screenGeometry(i))
-        
-        self.setGeometry(total_rect)
+        self.setGeometry(geometry)
         self.show()
 
     def setTransparency(self, alpha):
@@ -59,24 +58,48 @@ def resource_path(relative_path):
 class FlexLuxApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.overlay = OverlayWindow()
+        self.min_brightness = 0
+        self.max_brightness = 100
+        self._detect_monitors()
+        self._create_overlays()
         self.initUI()
         self.hide_timer = QTimer()
         self.hide_timer.timeout.connect(self.check_focus_and_hide)
 
+    def _detect_monitors(self):
+        try:
+            self.monitor_names = sbc.list_monitors()
+        except Exception:
+            self.monitor_names = []
+        self._has_hardware_monitors = len(self.monitor_names) > 0
+        if not self.monitor_names:
+            self.monitor_names = ["Display"]
+
+    def _create_overlays(self):
+        desktop = QApplication.desktop()
+        screen_count = desktop.screenCount()
+        if len(self.monitor_names) > 1 and screen_count > 1:
+            self.overlays = []
+            for i in range(screen_count):
+                self.overlays.append(OverlayWindow(desktop.screenGeometry(i)))
+        else:
+            self.overlays = [OverlayWindow()]
+
     def adjust_window_size(self):
         screen_width = QApplication.desktop().screenGeometry().width()
         new_width = int(0.15 * screen_width)
-        new_height = int(new_width / 3.5)
+        single_height = int(new_width / 3.5)
+        n = len(self.monitor_names)
+        if n > 1:
+            new_height = single_height * n + 16 * (n - 1)
+        else:
+            new_height = single_height
         self.resize(new_width, new_height)
 
     def initUI(self):
         layout = QVBoxLayout()
-
-        self.slider = QSlider(Qt.Horizontal, self)
-        self.slider.setRange(0, 200)  # 0-100 for left side, 100-200 for right side
-        self.slider.setValue(100)  # Start at center
-        self.slider.valueChanged[int].connect(self.changeBrightness)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(2)
 
         slider_style = """
         .QSlider {
@@ -94,10 +117,24 @@ class FlexLuxApp(QWidget):
         }
         """
 
-        self.slider.setStyleSheet(slider_style)
-        self.setStyleSheet("background-color: #111111;")
+        self.sliders = []
+        multi = len(self.monitor_names) > 1
 
-        layout.addWidget(self.slider)
+        for i, name in enumerate(self.monitor_names):
+            if multi:
+                label = QLabel(name)
+                label.setStyleSheet("color: #888888; font-size: 10px; margin: 0; padding: 0;")
+                layout.addWidget(label)
+
+            slider = QSlider(Qt.Horizontal, self)
+            slider.setRange(0, 200)
+            slider.setValue(100)
+            slider.setStyleSheet(slider_style)
+            slider.valueChanged[int].connect(lambda value, idx=i: self._on_slider_changed(idx, value))
+            layout.addWidget(slider)
+            self.sliders.append(slider)
+
+        self.setStyleSheet("background-color: #111111;")
         self.setLayout(layout)
 
         self.adjust_window_size()
@@ -129,40 +166,40 @@ class FlexLuxApp(QWidget):
         self.tray_icon.show()
         self.tray_icon.activated.connect(self.on_tray_icon_activated)
 
-        # Initialize brightness safely
-        try:
-            self.min_brightness = 0
-            self.max_brightness = 100
-            self.current_brightness = sbc.get_brightness()[0]
-            sbc.set_brightness(self.min_brightness)
-        except Exception as e:
-            print(f"Warning: Could not initialize brightness control: {e}")
-            # Continue without setting brightness
+        # Initialize brightness safely per monitor
+        for name in self.monitor_names:
+            try:
+                if self._has_hardware_monitors:
+                    sbc.set_brightness(self.min_brightness, display=name)
+            except Exception as e:
+                print(f"Warning: Could not initialize brightness for {name}: {e}")
 
         # Platform-specific event handling
         if platform.system() != "Darwin":  # Not macOS
             QApplication.instance().installEventFilter(self)
 
-    def changeBrightness(self, value):
+    def _on_slider_changed(self, monitor_idx, value):
+        monitor_name = self.monitor_names[monitor_idx]
+        overlay = self.overlays[min(monitor_idx, len(self.overlays) - 1)]
         try:
             if value == 100:
-                # Center position: minimum genuine brightness, no artificial darkness
-                sbc.set_brightness(self.min_brightness)
-                self.overlay.setTransparency(0)
+                if self._has_hardware_monitors:
+                    sbc.set_brightness(self.min_brightness, display=monitor_name)
+                overlay.setTransparency(0)
             elif value > 100:
-                # Right side: increase genuine brightness, no artificial darkness
-                brightness_percent = (value - 100) / 100
-                new_brightness = int(self.min_brightness + (self.max_brightness - self.min_brightness) * brightness_percent)
-                sbc.set_brightness(new_brightness)
-                self.overlay.setTransparency(0)
+                if self._has_hardware_monitors:
+                    brightness_percent = (value - 100) / 100
+                    new_brightness = int(self.min_brightness + (self.max_brightness - self.min_brightness) * brightness_percent)
+                    sbc.set_brightness(new_brightness, display=monitor_name)
+                overlay.setTransparency(0)
             else:
-                # Left side: minimum genuine brightness, increase artificial darkness
-                sbc.set_brightness(self.min_brightness)
+                if self._has_hardware_monitors:
+                    sbc.set_brightness(self.min_brightness, display=monitor_name)
                 darkness_percent = (100 - value) / 100
-                max_darkness = 0.9  # 90% maximum darkness
-                self.overlay.setTransparency(int(darkness_percent * max_darkness * 255))
+                max_darkness = 0.9
+                overlay.setTransparency(int(darkness_percent * max_darkness * 255))
         except Exception as e:
-            print(f"Warning: Could not change brightness: {e}")
+            print(f"Warning: Could not change brightness for {monitor_name}: {e}")
 
     def toggle_window(self):
         if self.isVisible():
@@ -216,8 +253,8 @@ class FlexLuxApp(QWidget):
         return super().eventFilter(obj, event)
 
     def closeEvent(self, event):
-        # Ensure overlay is cleaned up
-        self.overlay.close()
+        for overlay in self.overlays:
+            overlay.close()
         event.accept()
 
 if __name__ == '__main__':
