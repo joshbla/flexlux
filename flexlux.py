@@ -12,7 +12,7 @@ import os
 import platform
 from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel
 from PyQt5.QtGui import QIcon, QColor, QPainter, QCursor
-from PyQt5.QtCore import Qt, QRect, QEvent, QTimer
+from PyQt5.QtCore import Qt, QRect, QEvent, QTimer, QSettings
 import screen_brightness_control as sbc
 
 class OverlayWindow(QWidget):
@@ -60,9 +60,15 @@ class FlexLuxApp(QWidget):
         super().__init__()
         self.min_brightness = 0
         self.max_brightness = 100
+        self.settings = QSettings("FlexLux", "FlexLux")
+        self._save_timer = QTimer()
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(300)
+        self._save_timer.timeout.connect(self._save_settings)
         self._detect_monitors()
         self._create_overlays()
         self.initUI()
+        self._restore_settings()
         self.hide_timer = QTimer()
         self.hide_timer.timeout.connect(self.check_focus_and_hide)
 
@@ -84,6 +90,20 @@ class FlexLuxApp(QWidget):
                 self.overlays.append(OverlayWindow(desktop.screenGeometry(i)))
         else:
             self.overlays = [OverlayWindow()]
+
+    def _restore_settings(self):
+        for i, name in enumerate(self.monitor_names):
+            key = f"brightness/{name}"
+            saved = self.settings.value(key, None)
+            if saved is not None:
+                value = int(saved)
+                value = max(0, min(200, value))
+                self.sliders[i].setValue(value)
+
+    def _save_settings(self):
+        for i, name in enumerate(self.monitor_names):
+            self.settings.setValue(f"brightness/{name}", self.sliders[i].value())
+        self.settings.sync()
 
     def adjust_window_size(self):
         screen_width = QApplication.desktop().screenGeometry().width()
@@ -179,6 +199,7 @@ class FlexLuxApp(QWidget):
             QApplication.instance().installEventFilter(self)
 
     def _on_slider_changed(self, monitor_idx, value):
+        self._save_timer.start()
         monitor_name = self.monitor_names[monitor_idx]
         overlay = self.overlays[min(monitor_idx, len(self.overlays) - 1)]
         try:
