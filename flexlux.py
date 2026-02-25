@@ -128,6 +128,9 @@ class FlexLuxApp(QWidget):
 
         self.tray_icon.show()
         self.tray_icon.activated.connect(self.on_tray_icon_activated)
+        
+        # Show window on startup for demonstration
+        QTimer.singleShot(500, self.show_window_on_startup)
 
         # Initialize brightness safely
         try:
@@ -164,6 +167,13 @@ class FlexLuxApp(QWidget):
         except Exception as e:
             print(f"Warning: Could not change brightness: {e}")
 
+    def show_window_on_startup(self):
+        """Show window on startup for demonstration"""
+        self.show()
+        self.activateWindow()
+        self.raise_()
+        self.updatePosition()
+    
     def toggle_window(self):
         if self.isVisible():
             self.hide()
