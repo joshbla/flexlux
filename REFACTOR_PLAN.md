@@ -89,40 +89,44 @@ class PlatformUIConfig:
 
 ## Phase plan
 
-Each phase produces a working application and is committed separately.
+Each phase produces a working application and was committed separately.
 
-### Phase 1: Scaffold the package and entry point
+### Phase 1: Scaffold the package and entry point (v1.4.0) ✓
 
-Create the `flexlux/` package directory. Move the existing code into the package as-is, with a thin `__main__.py` entry point. Update `flexlux.spec`, launcher scripts, `README.md`, and `AGENTS.md` to use `python -m flexlux`. Delete the old top-level `flexlux.py`.
+Created the `flexlux/` package directory. Moved existing code into the package with a thin `__main__.py` entry point. Updated `flexlux.spec`, launcher scripts, `README.md`, and `AGENTS.md` to use `python -m flexlux`. Deleted the old top-level `flexlux.py`.
 
-**Result:** App runs identically via `python -m flexlux`. No logic changes.
+### Phase 2: Extract logging, utils, and overlay (v1.4.1) ✓
 
-### Phase 2: Extract logging, utils, and overlay
+Moved `_setup_logging()` into `logging_setup.py`, `resource_path()` into `utils.py`, `OverlayWindow` into `overlay.py`. Logging is configured once in `__init__.py`; all modules use `logging.getLogger("FlexLux")`.
 
-Move `_setup_logging()` into `logging_setup.py`. Move `resource_path()` into `utils.py`. Move `OverlayWindow` into `overlay.py`. Each consuming module uses `log = logging.getLogger("FlexLux")` instead of the module-level global.
+### Phase 3: Extract autostart (v1.4.2) ✓
 
-**Result:** Three small, self-contained modules extracted. App unchanged.
+Moved autostart logic into `autostart.py` as free functions (`is_enabled()`, `set_enabled()`). ~110 lines removed from `FlexLuxApp`.
 
-### Phase 3: Extract autostart
+### Phase 4: Extract brightness backends (v1.4.3) ✓
 
-Move `_is_autostart_enabled`, `_set_autostart`, and `_get_autostart_executable` into `autostart.py` as free functions. `FlexLuxApp` calls into the module instead of using private methods. The executable path is passed as an argument rather than computed via `__file__`.
+Created `brightness/` subpackage with `BrightnessBackend` protocol, `MacBrightnessBackend` (mac.py), and `SbcBrightnessBackend` (sbc_backend.py). ~250 lines extracted. `app.py` no longer imports `sbc`, `ctypes`, `subprocess`, or `shutil`.
 
-**Result:** ~110 lines removed from the main class. Platform autostart logic isolated.
+### Phase 5: Extract platform UI config (v1.4.4) ✓
 
-### Phase 4: Extract brightness backends
+Created `platform_ui.py` with frozen `PlatformUIConfig` dataclass. All 7 `platform.system()` calls removed from `app.py` and `overlay.py`. Platform behavior declared in one place.
 
-Create the `brightness/` subpackage. Move `MacBrightnessControl` and its ctypes structs into `mac.py`. Create `sbc_backend.py` wrapping `screen_brightness_control` behind the same interface. Add the `BrightnessBackend` protocol and `get_backend()` factory in `brightness/__init__.py`. Remove all brightness-related platform checks from `app.py`.
+### Phase 6: Final cleanup (v1.4.5) ✓
 
-**Result:** ~250 lines extracted. Largest single improvement. `app.py` no longer imports `sbc` or `ctypes`.
+Added hidden imports for lazy-loaded brightness backends to `flexlux.spec` so PyInstaller CI builds work. Verified zero `platform.system()` calls in `app.py` and `overlay.py`. Refactor complete.
 
-### Phase 5: Extract platform UI config
+## Final module inventory
 
-Create `platform_ui.py` with the `PlatformUIConfig` dataclass and a `get_ui_config()` factory. Update `app.py` and `overlay.py` to read window flags, positioning, event filter behavior, tray menu style, and min brightness from the config instead of branching on `platform.system()`.
-
-**Result:** All remaining `platform.system()` calls removed from `app.py` and `overlay.py`. Platform behavior is declared in one place.
-
-### Phase 6: Final cleanup
-
-Review `app.py` for any remaining platform checks. Update imports, docstrings, and module-level comments. Verify `pyinstaller flexlux.spec` still produces working builds. Update `REFACTOR_PLAN.md` to mark completion or remove it.
-
-**Result:** Refactor complete. Clean package structure with platform concerns fully isolated.
+| Module | Lines | Purpose |
+|--------|-------|---------|
+| `__init__.py` | 4 | VERSION, logging setup trigger |
+| `__main__.py` | 27 | Entry point (`python -m flexlux`) |
+| `app.py` | 460 | FlexLuxApp — UI, tray, sliders, settings (platform-agnostic) |
+| `autostart.py` | 109 | Cross-platform autostart (winreg / launchd / XDG) |
+| `brightness/__init__.py` | 23 | BrightnessBackend protocol + factory |
+| `brightness/mac.py` | 245 | macOS: DisplayServices + m1ddc |
+| `brightness/sbc_backend.py` | 32 | Windows/Linux: screen_brightness_control wrapper |
+| `logging_setup.py` | 30 | Logger configuration |
+| `overlay.py` | 36 | Translucent darkening overlay widget |
+| `platform_ui.py` | 75 | PlatformUIConfig dataclass (window flags, slider dims, etc.) |
+| `utils.py` | 9 | PyInstaller-aware asset path resolution |

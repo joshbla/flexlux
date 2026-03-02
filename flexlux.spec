@@ -15,7 +15,11 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('assets/icon.png', 'assets')],
-    hiddenimports=['screen_brightness_control'],
+    hiddenimports=[
+        'screen_brightness_control',
+        'flexlux.brightness.mac',
+        'flexlux.brightness.sbc_backend',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
