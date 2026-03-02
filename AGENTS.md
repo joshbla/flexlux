@@ -1,6 +1,6 @@
 # FlexLux
 
-Single-file PyQt5 desktop app (`flexlux.py`) for adjusting monitor brightness via a system tray slider. See `README.md` for full usage and build instructions.
+PyQt5 desktop app for adjusting monitor brightness via a system tray slider. The code lives in the `flexlux/` package. See `README.md` for full usage and build instructions.
 
 **Platform note:** Primarily developed for Windows. macOS and Linux (X11) also supported but less tested.
 
@@ -10,7 +10,7 @@ Single-file PyQt5 desktop app (`flexlux.py`) for adjusting monitor brightness vi
 
 ```bash
 source venv/bin/activate
-python3 flexlux.py
+python3 -m flexlux
 ```
 
 The app starts as a **system tray icon** — it does not open a visible window by default. Click the tray icon to toggle the brightness slider. Right-click for Quit.
@@ -32,7 +32,7 @@ No project-specific lint config exists. For basic checks:
 
 ```bash
 source venv/bin/activate
-flake8 flexlux.py --max-line-length=120
+flake8 flexlux/ --max-line-length=120
 ```
 
 Pre-existing style warnings (whitespace, line length) are expected.

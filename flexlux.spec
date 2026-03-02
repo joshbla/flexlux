@@ -11,7 +11,7 @@ else:
     data_separator = ':'
 
 a = Analysis(
-    ['flexlux.py'],
+    ['flexlux/__main__.py'],
     pathex=[],
     binaries=[],
     datas=[('assets/icon.png', 'assets')],

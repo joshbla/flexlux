@@ -19,4 +19,4 @@ IF %ERRORLEVEL% NEQ 0 (
 
 REM Run FlexLux
 echo Starting FlexLux...
-python flexlux.py 
+python -m flexlux 

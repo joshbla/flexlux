@@ -1,15 +1,3 @@
-# Python 3.9+ required (3.10+ recommended)
-# python3.11 -m venv venv
-# .\venv\Scripts\Activate (Windows) or source venv/bin/activate (Linux/macOS)
-# pip install PyQt5 pyinstaller Pillow screen_brightness_control
-# macOS external monitor brightness (optional): brew install m1ddc
-# Build commands:
-# Windows: pyinstaller --onefile --windowed --icon=assets/icon.png --add-data="assets/icon.png;assets/" flexlux.py
-# Linux/macOS: pyinstaller --onefile --windowed --icon=assets/icon.png --add-data="assets/icon.png:assets/" flexlux.py
-# Or use the spec file: pyinstaller flexlux.spec
-
-VERSION = "1.3.0"
-
 import sys
 import os
 import platform
@@ -24,6 +12,10 @@ if platform.system() == "Darwin":
     import shutil
 else:
     import screen_brightness_control as sbc
+
+from flexlux import VERSION
+
+_MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "__main__.py")
 
 
 def _setup_logging():
@@ -713,7 +705,7 @@ class FlexLuxApp(QWidget):
     def _get_autostart_executable(self):
         if getattr(sys, 'frozen', False):
             return sys.executable
-        return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+        return f'"{sys.executable}" "{_MAIN_SCRIPT}"'
 
     def _is_autostart_enabled(self):
         system = platform.system()
@@ -769,7 +761,7 @@ class FlexLuxApp(QWidget):
                     args = f"        <string>{exe}</string>"
                 else:
                     args = (f"        <string>{sys.executable}</string>\n"
-                            f"        <string>{os.path.abspath(__file__)}</string>")
+                            f"        <string>{_MAIN_SCRIPT}</string>")
                 plist = (
                     '<?xml version="1.0" encoding="UTF-8"?>\n'
                     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
@@ -891,10 +883,3 @@ class FlexLuxApp(QWidget):
         for overlay in self.overlays:
             overlay.close()
         event.accept()
-
-if __name__ == '__main__':
-    log.info("FlexLux v%s starting on %s", VERSION, platform.system())
-    app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)  # Keep running in system tray
-    ex = FlexLuxApp()
-    sys.exit(app.exec_())

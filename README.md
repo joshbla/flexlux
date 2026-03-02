@@ -59,7 +59,7 @@ pip install -r requirements.txt
 
 4. Run the application:
 ```bash
-python flexlux.py
+python -m flexlux
 ```
 
 ### Option 2: Run as Compiled Executable (No Python Required)
@@ -92,10 +92,10 @@ pyinstaller flexlux.spec
 
 # Or build manually:
 # Windows
-pyinstaller --onefile --windowed --icon=assets/icon.png --add-data="assets/icon.png;assets/" flexlux.py
+pyinstaller --onefile --windowed --icon=assets/icon.png --add-data="assets/icon.png;assets/" flexlux/__main__.py
 
 # Linux/macOS  
-pyinstaller --onefile --windowed --icon=assets/icon.png --add-data="assets/icon.png:assets/" flexlux.py
+pyinstaller --onefile --windowed --icon=assets/icon.png --add-data="assets/icon.png:assets/" flexlux/__main__.py
 ```
 
 The executable will be created in the `dist/` directory.
@@ -130,7 +130,7 @@ Right-click the tray icon for additional options.
 
 If brightness control doesn't work:
 - Ensure your display drivers are up to date
-- On Linux, you may need to run with elevated privileges: `sudo python flexlux.py`
+- On Linux, you may need to run with elevated privileges: `sudo python -m flexlux`
 - On macOS, if the hardware brightness slider is grayed out for an external monitor, install `m1ddc` (`brew install m1ddc`) and restart FlexLux. If it's still grayed out, your display likely doesn't support DDC/CI
 - Check that `screen_brightness_control` supports your hardware
 
