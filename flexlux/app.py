@@ -462,7 +462,6 @@ class FlexLuxApp(QWidget):
             return super().eventFilter(obj, event)
 
         if event.type() == QEvent.WindowDeactivate:
-            # Use timer to allow for child widget focus
             self.hide_timer.start(100)
         elif event.type() == QEvent.WindowActivate:
             self.hide_timer.stop()
