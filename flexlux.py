@@ -10,6 +10,8 @@
 import sys
 import os
 import platform
+import logging
+from logging.handlers import RotatingFileHandler
 from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel
 from PyQt5.QtGui import QIcon, QColor, QPainter, QCursor
 from PyQt5.QtCore import Qt, QRect, QEvent, QTimer, QSettings
@@ -19,6 +21,36 @@ if platform.system() == "Darwin":
     import shutil
 else:
     import screen_brightness_control as sbc
+
+
+def _setup_logging():
+    system = platform.system()
+    if system == "Windows":
+        log_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "FlexLux")
+    elif system == "Darwin":
+        log_dir = os.path.expanduser("~/Library/Logs")
+    else:
+        log_dir = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "FlexLux")
+    os.makedirs(log_dir, exist_ok=True)
+
+    logger = logging.getLogger("FlexLux")
+    logger.setLevel(logging.DEBUG)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+    fh = RotatingFileHandler(os.path.join(log_dir, "FlexLux.log"), maxBytes=1_000_000, backupCount=1)
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+
+    sh = logging.StreamHandler()
+    sh.setLevel(logging.WARNING)
+    sh.setFormatter(fmt)
+    logger.addHandler(sh)
+
+    return logger
+
+
+log = _setup_logging()
 
 
 if platform.system() == "Darwin":
@@ -44,7 +76,7 @@ if platform.system() == "Darwin":
                     ctypes.c_uint32, ctypes.POINTER(ctypes.c_float)]
                 self._ds.DisplayServicesGetBrightness.restype = ctypes.c_int
             except (OSError, AttributeError) as e:
-                print(f"Warning: DisplayServices not available: {e}")
+                log.warning("DisplayServices not available: %s", e)
 
             self._m1ddc = shutil.which('m1ddc')
             self._displays = []
@@ -99,7 +131,7 @@ if platform.system() == "Darwin":
                 kr = self._ds.DisplayServicesSetBrightness(
                     target['id'], ctypes.c_float(brightness))
                 if kr != 0:
-                    print(f"Warning: DisplayServicesSetBrightness returned {kr}")
+                    log.warning("DisplayServicesSetBrightness returned %d", kr)
             elif target['method'] == 'm1ddc':
                 ext_num = 1
                 for d in self._displays:
@@ -113,7 +145,7 @@ if platform.system() == "Darwin":
                          '-d', str(ext_num)],
                         capture_output=True, timeout=2)
                 except Exception as e:
-                    print(f"Warning: m1ddc brightness set failed: {e}")
+                    log.warning("m1ddc brightness set failed: %s", e)
 
         def cleanup(self):
             pass
@@ -183,7 +215,7 @@ class FlexLuxApp(QWidget):
                 self._mac_brightness = MacBrightnessControl()
                 self.monitor_names = self._mac_brightness.list_monitors()
             except Exception as e:
-                print(f"Warning: macOS brightness init failed: {e}")
+                log.warning("macOS brightness init failed: %s", e)
                 self._mac_brightness = None
                 self.monitor_names = []
         else:
@@ -272,7 +304,7 @@ class FlexLuxApp(QWidget):
             slider.setRange(0, 200)
             slider.setValue(100)
             slider.setStyleSheet(slider_style)
-            slider.valueChanged[int].connect(lambda value, idx=i: self._on_slider_changed(idx, value))
+            slider.valueChanged[int].connect(lambda value, idx=i: self._snap_and_update(idx, value))
             layout.addWidget(slider)
 
             zone_row = QHBoxLayout()
@@ -337,7 +369,7 @@ class FlexLuxApp(QWidget):
                 if self._has_hardware_monitors:
                     self._set_hardware_brightness(self.min_brightness, name)
             except Exception as e:
-                print(f"Warning: Could not initialize brightness for {name}: {e}")
+                log.warning("Could not initialize brightness for %s: %s", name, e)
 
         # Platform-specific event handling
         if platform.system() != "Darwin":  # Not macOS
@@ -349,6 +381,14 @@ class FlexLuxApp(QWidget):
             self._mac_brightness.set_brightness(value, display=display)
         else:
             sbc.set_brightness(value, display=display)
+
+    _SNAP_THRESHOLD = 5
+
+    def _snap_and_update(self, monitor_idx, value):
+        if value != 100 and abs(value - 100) <= self._SNAP_THRESHOLD:
+            self.sliders[monitor_idx].setValue(100)
+            return
+        self._on_slider_changed(monitor_idx, value)
 
     def _on_slider_changed(self, monitor_idx, value):
         self._save_timer.start()
@@ -372,7 +412,7 @@ class FlexLuxApp(QWidget):
                 max_darkness = 0.9
                 overlay.setTransparency(int(darkness_percent * max_darkness * 255))
         except Exception as e:
-            print(f"Warning: Could not change brightness for {monitor_name}: {e}")
+            log.warning("Could not change brightness for %s: %s", monitor_name, e)
 
     def _get_autostart_executable(self):
         if getattr(sys, 'frozen', False):
@@ -479,7 +519,7 @@ class FlexLuxApp(QWidget):
         try:
             self._set_autostart(enabled)
         except Exception as e:
-            print(f"Warning: Could not {'enable' if enabled else 'disable'} autostart: {e}")
+            log.warning("Could not %s autostart: %s", "enable" if enabled else "disable", e)
             self.autostart_action.setChecked(not enabled)
 
     def toggle_window(self):
@@ -544,6 +584,7 @@ class FlexLuxApp(QWidget):
         event.accept()
 
 if __name__ == '__main__':
+    log.info("FlexLux starting on %s", platform.system())
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # Keep running in system tray
     ex = FlexLuxApp()
