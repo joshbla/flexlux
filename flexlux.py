@@ -7,12 +7,14 @@
 # Linux/macOS: pyinstaller --onefile --windowed --icon=assets/icon.png --add-data="assets/icon.png:assets/" flexlux.py
 # Or use the spec file: pyinstaller flexlux.spec
 
+VERSION = "1.1.0"
+
 import sys
 import os
 import platform
 import logging
 from logging.handlers import RotatingFileHandler
-from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel
+from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel, QMessageBox
 from PyQt5.QtGui import QIcon, QColor, QPainter, QCursor
 from PyQt5.QtCore import Qt, QRect, QEvent, QTimer, QSettings
 if platform.system() == "Darwin":
@@ -352,10 +354,13 @@ class FlexLuxApp(QWidget):
         self.autostart_action.setCheckable(True)
         self.autostart_action.setChecked(self._is_autostart_enabled())
         self.autostart_action.triggered.connect(self._toggle_autostart)
+        self.about_action = QAction("About", self)
+        self.about_action.triggered.connect(self._show_about)
         self.quit_action = QAction("Quit", self)
         self.quit_action.triggered.connect(QApplication.instance().quit)
         self.tray_menu.addAction(self.show_action)
         self.tray_menu.addAction(self.autostart_action)
+        self.tray_menu.addAction(self.about_action)
         self.tray_menu.addSeparator()
         self.tray_menu.addAction(self.quit_action)
         if platform.system() != "Darwin":
@@ -522,6 +527,16 @@ class FlexLuxApp(QWidget):
             log.warning("Could not %s autostart: %s", "enable" if enabled else "disable", e)
             self.autostart_action.setChecked(not enabled)
 
+    def _show_about(self):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("About FlexLux")
+        msg.setTextFormat(Qt.RichText)
+        msg.setText(
+            f"<b>FlexLux v{VERSION}</b><br><br>"
+            "Adjust monitor brightness beyond hardware limits.<br><br>"
+            '<a href="https://github.com/joshbla/flexlux">github.com/joshbla/flexlux</a>')
+        msg.exec_()
+
     def toggle_window(self):
         if self.isVisible():
             self.hide()
@@ -584,7 +599,7 @@ class FlexLuxApp(QWidget):
         event.accept()
 
 if __name__ == '__main__':
-    log.info("FlexLux starting on %s", platform.system())
+    log.info("FlexLux v%s starting on %s", VERSION, platform.system())
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # Keep running in system tray
     ex = FlexLuxApp()
