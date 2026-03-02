@@ -1,8 +1,8 @@
-import platform
-
 from PyQt5.QtWidgets import QApplication, QWidget
 from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtCore import Qt, QRect
+
+from flexlux.platform_ui import get_ui_config
 
 
 class OverlayWindow(QWidget):
@@ -12,15 +12,9 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WA_NoSystemBackground)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        
-        # Platform-specific window flags
-        if platform.system() == "Windows":
-            self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
-        elif platform.system() == "Darwin":  # macOS — Qt.Tool omitted so overlays persist when the app deactivates
-            self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus)
-        else:  # Linux
-            self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool | Qt.X11BypassWindowManagerHint)
-        
+
+        self.setWindowFlags(get_ui_config().overlay_flags)
+
         if geometry is None:
             desktop = QApplication.desktop()
             total_rect = QRect()

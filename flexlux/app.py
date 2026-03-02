@@ -1,4 +1,3 @@
-import platform
 import logging
 from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel, QMessageBox, QCheckBox
 from PyQt5.QtGui import QIcon, QCursor
@@ -7,6 +6,7 @@ from PyQt5.QtCore import Qt, QEvent, QTimer, QSettings
 from flexlux import VERSION
 from flexlux.brightness import get_backend
 from flexlux.overlay import OverlayWindow
+from flexlux.platform_ui import get_ui_config
 from flexlux.utils import resource_path
 from flexlux import autostart
 
@@ -16,6 +16,7 @@ log = logging.getLogger("FlexLux")
 class FlexLuxApp(QWidget):
     def __init__(self):
         super().__init__()
+        self._ui = get_ui_config()
         self.max_brightness = 100
         self.settings = QSettings("FlexLux", "FlexLux")
         self._save_timer = QTimer()
@@ -110,10 +111,11 @@ class FlexLuxApp(QWidget):
         self.resize(new_width, new_height)
 
     def _build_sliders(self, layout):
-        if platform.system() == "Darwin":
-            handle_w, handle_r, handle_m, groove_h, max_h = 24, 12, -8, 6, 40
-        else:
-            handle_w, handle_r, handle_m, groove_h, max_h = 50, 25, -20, 10, 70
+        handle_w = self._ui.slider_handle_width
+        handle_r = self._ui.slider_handle_radius
+        handle_m = self._ui.slider_handle_margin
+        groove_h = self._ui.slider_groove_height
+        max_h = self._ui.slider_max_height
 
         def _slider_style(hw_capable):
             if hw_capable:
@@ -228,11 +230,7 @@ class FlexLuxApp(QWidget):
 
         self.adjust_window_size()
 
-        # Platform-specific window flags
-        if platform.system() == "Darwin":  # macOS
-            self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        else:
-            self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)
+        self.setWindowFlags(self._ui.app_window_flags)
         
         self.setWindowTitle('FlexLux')
         self.setWindowIcon(QIcon(resource_path('assets/icon.png')))
@@ -254,14 +252,13 @@ class FlexLuxApp(QWidget):
         self.tray_menu.addAction(self.about_action)
         self.tray_menu.addSeparator()
         self.tray_menu.addAction(self.quit_action)
-        if platform.system() != "Darwin":
+        if not self._ui.use_manual_tray_menu:
             self.tray_icon.setContextMenu(self.tray_menu)
 
         self.tray_icon.show()
         self.tray_icon.activated.connect(self.on_tray_icon_activated)
 
-        # Platform-specific event handling
-        if platform.system() != "Darwin":  # Not macOS
+        if self._ui.use_event_filter:
             QApplication.instance().installEventFilter(self)
 
     def _set_hardware_brightness(self, value, display):
@@ -410,7 +407,7 @@ class FlexLuxApp(QWidget):
     def on_tray_icon_activated(self, reason):
         if reason == QSystemTrayIcon.Trigger:
             self.toggle_window()
-        elif reason == QSystemTrayIcon.Context and platform.system() == "Darwin":
+        elif reason == QSystemTrayIcon.Context and self._ui.use_manual_tray_menu:
             if self.tray_menu.isVisible():
                 self.tray_menu.hide()
             else:
@@ -425,10 +422,10 @@ class FlexLuxApp(QWidget):
 
         x = cursor_pos.x() - window_width // 2
 
-        if platform.system() == "Darwin":
-            y = screen_geometry.y() + 30
+        if self._ui.panel_y_from_top:
+            y = screen_geometry.y() + self._ui.panel_top_offset
         else:
-            y = screen_geometry.height() - window_height - 50
+            y = screen_geometry.height() - window_height - self._ui.panel_bottom_offset
 
         x = max(screen_geometry.x(), min(x, screen_geometry.x() + screen_geometry.width() - window_width))
         y = max(screen_geometry.y(), min(y, screen_geometry.y() + screen_geometry.height() - window_height))
@@ -442,9 +439,9 @@ class FlexLuxApp(QWidget):
             self._set_poll_speed(fast=False)
 
     def eventFilter(self, obj, event):
-        if platform.system() == "Darwin":  # macOS needs different handling
+        if not self._ui.use_event_filter:
             return super().eventFilter(obj, event)
-        
+
         if event.type() == QEvent.WindowDeactivate:
             # Use timer to allow for child widget focus
             self.hide_timer.start(100)
