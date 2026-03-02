@@ -65,7 +65,10 @@ class FlexLuxApp(QWidget):
     def _create_overlays(self):
         desktop = QApplication.desktop()
         screen_count = desktop.screenCount()
+        self._overlay_for_monitor = []
+
         if len(self.monitor_names) > 1 and screen_count > 1:
+            screen_to_overlay = {}
             self.overlays = []
             for mon_idx, name in enumerate(self.monitor_names):
                 qt_screen = mon_idx
@@ -78,9 +81,13 @@ class FlexLuxApp(QWidget):
                                 qt_screen = s
                                 break
                 qt_screen = min(qt_screen, screen_count - 1)
-                self.overlays.append(OverlayWindow(desktop.screenGeometry(qt_screen)))
+                if qt_screen not in screen_to_overlay:
+                    screen_to_overlay[qt_screen] = len(self.overlays)
+                    self.overlays.append(OverlayWindow(desktop.screenGeometry(qt_screen)))
+                self._overlay_for_monitor.append(screen_to_overlay[qt_screen])
         else:
             self.overlays = [OverlayWindow()]
+            self._overlay_for_monitor = [0] * len(self.monitor_names)
 
     def _restore_settings(self):
         for i, name in enumerate(self.monitor_names):
@@ -323,8 +330,7 @@ class FlexLuxApp(QWidget):
             self.sliders[i].setValue(new_slider)
             self.sliders[i].blockSignals(False)
 
-            overlay = self.overlays[min(i, len(self.overlays) - 1)]
-            overlay.setTransparency(0)
+            self._recalc_overlay(self._overlay_for_monitor[i])
 
             self._save_timer.start()
 
@@ -349,30 +355,42 @@ class FlexLuxApp(QWidget):
                     s.setValue(clamped)
             self._syncing = False
 
+    @staticmethod
+    def _overlay_alpha_for_value(value):
+        """Compute overlay alpha (0-229) for a slider value."""
+        if value >= 100:
+            return 0
+        darkness_percent = (100 - value) / 100
+        max_darkness = 0.9
+        return int(darkness_percent * max_darkness * 255)
+
+    def _recalc_overlay(self, overlay_idx):
+        """Set an overlay's transparency to the darkest value across all monitors sharing it."""
+        max_alpha = 0
+        for i, ov_idx in enumerate(self._overlay_for_monitor):
+            if ov_idx == overlay_idx:
+                max_alpha = max(max_alpha, self._overlay_alpha_for_value(self.sliders[i].value()))
+        self.overlays[overlay_idx].setTransparency(max_alpha)
+
     def _on_slider_changed(self, monitor_idx, value):
         self._save_timer.start()
         if hasattr(self, '_poll_timer'):
             self._poll_timer.start()
         monitor_name = self.monitor_names[monitor_idx]
         hw = self._hw_capable[monitor_idx]
-        overlay = self.overlays[min(monitor_idx, len(self.overlays) - 1)]
         try:
             if value == 100:
                 if hw:
                     self._set_hardware_brightness(self.min_brightness, monitor_name)
-                overlay.setTransparency(0)
             elif value > 100:
                 if hw:
                     brightness_percent = (value - 100) / 100
                     new_brightness = int(self.min_brightness + (self.max_brightness - self.min_brightness) * brightness_percent)
                     self._set_hardware_brightness(new_brightness, monitor_name)
-                overlay.setTransparency(0)
             else:
                 if hw:
                     self._set_hardware_brightness(self.min_brightness, monitor_name)
-                darkness_percent = (100 - value) / 100
-                max_darkness = 0.9
-                overlay.setTransparency(int(darkness_percent * max_darkness * 255))
+            self._recalc_overlay(self._overlay_for_monitor[monitor_idx])
         except Exception as e:
             log.warning("Could not change brightness for %s: %s", monitor_name, e)
 

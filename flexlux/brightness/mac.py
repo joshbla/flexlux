@@ -26,9 +26,11 @@ class MacBrightnessBackend:
     def __init__(self):
         self._cg = ctypes.cdll.LoadLibrary(
             '/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
-        self._cg.CGGetActiveDisplayList.argtypes = [
+        self._cg.CGGetOnlineDisplayList.argtypes = [
             ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32),
             ctypes.POINTER(ctypes.c_uint32)]
+        self._cg.CGDisplayMirrorsDisplay.argtypes = [ctypes.c_uint32]
+        self._cg.CGDisplayMirrorsDisplay.restype = ctypes.c_uint32
         self._cg.CGDisplayIsBuiltin.argtypes = [ctypes.c_uint32]
         self._cg.CGDisplayIsBuiltin.restype = ctypes.c_int
         self._cg.CGDisplayBounds.argtypes = [ctypes.c_uint32]
@@ -121,7 +123,7 @@ class MacBrightnessBackend:
         display_ids = (ctypes.c_uint32 * max_displays)()
         display_count = ctypes.c_uint32()
 
-        result = self._cg.CGGetActiveDisplayList(
+        result = self._cg.CGGetOnlineDisplayList(
             max_displays, display_ids, ctypes.byref(display_count))
         if result != 0:
             return
@@ -130,6 +132,7 @@ class MacBrightnessBackend:
         for i in range(display_count.value):
             display_id = display_ids[i]
             is_builtin = bool(self._cg.CGDisplayIsBuiltin(display_id))
+            is_mirror = self._cg.CGDisplayMirrorsDisplay(display_id) != 0
             if is_builtin:
                 name = "Built-in Display"
                 method = 'displayservices' if self._ds else None
@@ -154,6 +157,8 @@ class MacBrightnessBackend:
                 elif self._m1ddc:
                     log.info("No m1ddc match found for CG display %d", display_id)
                 external_idx += 1
+            if is_mirror:
+                name += " (mirrored)"
             self._displays.append({
                 'id': display_id,
                 'name': name,
