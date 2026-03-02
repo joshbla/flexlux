@@ -13,6 +13,8 @@ class PlatformUIConfig:
     slider_handle_margin: int
     slider_groove_height: int
     slider_max_height: int
+    zone_label_font_size: int
+    mid_label_width: int
     panel_y_from_top: bool
     panel_top_offset: int
     panel_bottom_offset: int
@@ -28,6 +30,8 @@ _MACOS = PlatformUIConfig(
     slider_handle_margin=-8,
     slider_groove_height=6,
     slider_max_height=40,
+    zone_label_font_size=9,
+    mid_label_width=6,
     panel_y_from_top=True,
     panel_top_offset=30,
     panel_bottom_offset=50,
@@ -43,6 +47,8 @@ _WINDOWS = PlatformUIConfig(
     slider_handle_margin=-20,
     slider_groove_height=10,
     slider_max_height=70,
+    zone_label_font_size=14,
+    mid_label_width=10,
     panel_y_from_top=False,
     panel_top_offset=30,
     panel_bottom_offset=50,
@@ -58,6 +64,8 @@ _LINUX = PlatformUIConfig(
     slider_handle_margin=-20,
     slider_groove_height=10,
     slider_max_height=70,
+    zone_label_font_size=14,
+    mid_label_width=10,
     panel_y_from_top=False,
     panel_top_offset=30,
     panel_bottom_offset=50,

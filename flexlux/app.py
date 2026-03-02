@@ -147,9 +147,10 @@ class FlexLuxApp(QWidget):
             }}
             """
 
-        zone_label_style = "color: #555555; font-size: 9px; margin: 0; padding: 0;"
-        zone_label_disabled_style = "color: #222222; font-size: 9px; margin: 0; padding: 0;"
-        mid_label_style = "color: #333333; font-size: 9px; margin: 0; padding: 0;"
+        zfs = self._ui.zone_label_font_size
+        zone_label_style = f"color: #555555; font-size: {zfs}px; margin: 0; padding: 0;"
+        zone_label_disabled_style = f"color: #222222; font-size: {zfs}px; margin: 0; padding: 0;"
+        mid_label_style = f"color: #333333; font-size: {zfs}px; margin: 0; padding: 0;"
 
         self.sliders = []
         multi = len(self.monitor_names) > 1
@@ -176,7 +177,7 @@ class FlexLuxApp(QWidget):
             lbl_artificial.setAlignment(Qt.AlignCenter)
             lbl_artificial.setStyleSheet(zone_label_style)
             lbl_mid = QLabel("|")
-            lbl_mid.setFixedWidth(6)
+            lbl_mid.setFixedWidth(self._ui.mid_label_width)
             lbl_mid.setAlignment(Qt.AlignCenter)
             lbl_mid.setStyleSheet(mid_label_style)
             lbl_natural = QLabel("Natural")
