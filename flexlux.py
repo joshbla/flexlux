@@ -7,7 +7,7 @@
 # Linux/macOS: pyinstaller --onefile --windowed --icon=assets/icon.png --add-data="assets/icon.png:assets/" flexlux.py
 # Or use the spec file: pyinstaller flexlux.spec
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 import sys
 import os
@@ -348,8 +348,6 @@ class FlexLuxApp(QWidget):
         self.tray_icon.setIcon(QIcon(resource_path('assets/icon.png')))
         
         self.tray_menu = QMenu()
-        self.show_action = QAction("Show/Hide", self)
-        self.show_action.triggered.connect(self.toggle_window)
         self.autostart_action = QAction("Launch at Startup", self)
         self.autostart_action.setCheckable(True)
         self.autostart_action.setChecked(self._is_autostart_enabled())
@@ -358,7 +356,6 @@ class FlexLuxApp(QWidget):
         self.about_action.triggered.connect(self._show_about)
         self.quit_action = QAction("Quit", self)
         self.quit_action.triggered.connect(QApplication.instance().quit)
-        self.tray_menu.addAction(self.show_action)
         self.tray_menu.addAction(self.autostart_action)
         self.tray_menu.addAction(self.about_action)
         self.tray_menu.addSeparator()
@@ -528,14 +525,13 @@ class FlexLuxApp(QWidget):
             self.autostart_action.setChecked(not enabled)
 
     def _show_about(self):
-        msg = QMessageBox(self)
-        msg.setWindowTitle("About FlexLux")
-        msg.setTextFormat(Qt.RichText)
-        msg.setText(
-            f"<b>FlexLux v{VERSION}</b><br><br>"
-            "Adjust monitor brightness beyond hardware limits.<br><br>"
-            '<a href="https://github.com/joshbla/flexlux">github.com/joshbla/flexlux</a>')
-        msg.exec_()
+        QMessageBox.about(
+            self, "About FlexLux",
+            f"<h3>FlexLux v{VERSION}</h3>"
+            "<p>Adjust monitor brightness beyond hardware limits.</p>"
+            '<p><a href="https://github.com/joshbla/flexlux">github.com/joshbla/flexlux</a><br>'
+            '<a href="https://github.com/joshbla/flexlux/issues">Report issues here</a></p>'
+        )
 
     def toggle_window(self):
         if self.isVisible():
