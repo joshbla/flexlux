@@ -10,7 +10,7 @@
 import sys
 import os
 import platform
-from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel
+from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel
 from PyQt5.QtGui import QIcon, QColor, QPainter, QCursor
 from PyQt5.QtCore import Qt, QRect, QEvent, QTimer, QSettings
 if platform.system() == "Darwin":
@@ -222,7 +222,7 @@ class FlexLuxApp(QWidget):
     def adjust_window_size(self):
         screen_width = QApplication.desktop().screenGeometry().width()
         new_width = int(0.15 * screen_width)
-        single_height = int(new_width / 3.5)
+        single_height = int(new_width / 2.8)
         n = len(self.monitor_names)
         if n > 1:
             new_height = single_height * n + 16 * (n - 1)
@@ -256,6 +256,9 @@ class FlexLuxApp(QWidget):
         }}
         """
 
+        zone_label_style = "color: #555555; font-size: 9px; margin: 0; padding: 0;"
+        mid_label_style = "color: #333333; font-size: 9px; margin: 0; padding: 0;"
+
         self.sliders = []
         multi = len(self.monitor_names) > 1
 
@@ -271,6 +274,25 @@ class FlexLuxApp(QWidget):
             slider.setStyleSheet(slider_style)
             slider.valueChanged[int].connect(lambda value, idx=i: self._on_slider_changed(idx, value))
             layout.addWidget(slider)
+
+            zone_row = QHBoxLayout()
+            zone_row.setContentsMargins(0, 0, 0, 0)
+            zone_row.setSpacing(0)
+            lbl_artificial = QLabel("Artificial")
+            lbl_artificial.setAlignment(Qt.AlignCenter)
+            lbl_artificial.setStyleSheet(zone_label_style)
+            lbl_mid = QLabel("|")
+            lbl_mid.setFixedWidth(6)
+            lbl_mid.setAlignment(Qt.AlignCenter)
+            lbl_mid.setStyleSheet(mid_label_style)
+            lbl_natural = QLabel("Natural")
+            lbl_natural.setAlignment(Qt.AlignCenter)
+            lbl_natural.setStyleSheet(zone_label_style)
+            zone_row.addWidget(lbl_artificial, 1)
+            zone_row.addWidget(lbl_mid, 0)
+            zone_row.addWidget(lbl_natural, 1)
+            layout.addLayout(zone_row)
+
             self.sliders.append(slider)
 
         self.setStyleSheet("background-color: #111111;")
@@ -291,13 +313,17 @@ class FlexLuxApp(QWidget):
         self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setIcon(QIcon(resource_path('assets/icon.png')))
         
-        # Add context menu for cross-platform compatibility
         self.tray_menu = QMenu()
         self.show_action = QAction("Show/Hide", self)
         self.show_action.triggered.connect(self.toggle_window)
+        self.autostart_action = QAction("Launch at Startup", self)
+        self.autostart_action.setCheckable(True)
+        self.autostart_action.setChecked(self._is_autostart_enabled())
+        self.autostart_action.triggered.connect(self._toggle_autostart)
         self.quit_action = QAction("Quit", self)
-        self.quit_action.triggered.connect(app.quit)
+        self.quit_action.triggered.connect(QApplication.instance().quit)
         self.tray_menu.addAction(self.show_action)
+        self.tray_menu.addAction(self.autostart_action)
         self.tray_menu.addSeparator()
         self.tray_menu.addAction(self.quit_action)
         if platform.system() != "Darwin":
@@ -347,6 +373,114 @@ class FlexLuxApp(QWidget):
                 overlay.setTransparency(int(darkness_percent * max_darkness * 255))
         except Exception as e:
             print(f"Warning: Could not change brightness for {monitor_name}: {e}")
+
+    def _get_autostart_executable(self):
+        if getattr(sys, 'frozen', False):
+            return sys.executable
+        return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+
+    def _is_autostart_enabled(self):
+        system = platform.system()
+        if system == "Windows":
+            try:
+                import winreg
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Run",
+                    0, winreg.KEY_READ)
+                try:
+                    winreg.QueryValueEx(key, "FlexLux")
+                    return True
+                except FileNotFoundError:
+                    return False
+                finally:
+                    winreg.CloseKey(key)
+            except Exception:
+                return False
+        elif system == "Darwin":
+            return os.path.exists(
+                os.path.expanduser("~/Library/LaunchAgents/com.flexlux.app.plist"))
+        else:
+            return os.path.exists(
+                os.path.expanduser("~/.config/autostart/flexlux.desktop"))
+
+    def _set_autostart(self, enabled):
+        system = platform.system()
+        exe = self._get_autostart_executable()
+
+        if system == "Windows":
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0, winreg.KEY_SET_VALUE)
+            try:
+                if enabled:
+                    winreg.SetValueEx(key, "FlexLux", 0, winreg.REG_SZ, exe)
+                else:
+                    try:
+                        winreg.DeleteValue(key, "FlexLux")
+                    except FileNotFoundError:
+                        pass
+            finally:
+                winreg.CloseKey(key)
+
+        elif system == "Darwin":
+            plist_path = os.path.expanduser(
+                "~/Library/LaunchAgents/com.flexlux.app.plist")
+            if enabled:
+                if getattr(sys, 'frozen', False):
+                    args = f"        <string>{exe}</string>"
+                else:
+                    args = (f"        <string>{sys.executable}</string>\n"
+                            f"        <string>{os.path.abspath(__file__)}</string>")
+                plist = (
+                    '<?xml version="1.0" encoding="UTF-8"?>\n'
+                    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
+                    ' "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+                    '<plist version="1.0">\n<dict>\n'
+                    '    <key>Label</key>\n'
+                    '    <string>com.flexlux.app</string>\n'
+                    '    <key>ProgramArguments</key>\n'
+                    '    <array>\n'
+                    f'{args}\n'
+                    '    </array>\n'
+                    '    <key>RunAtLoad</key>\n'
+                    '    <true/>\n'
+                    '</dict>\n</plist>\n')
+                os.makedirs(os.path.dirname(plist_path), exist_ok=True)
+                with open(plist_path, 'w') as f:
+                    f.write(plist)
+            else:
+                if os.path.exists(plist_path):
+                    os.remove(plist_path)
+
+        else:  # Linux
+            desktop_path = os.path.expanduser(
+                "~/.config/autostart/flexlux.desktop")
+            if enabled:
+                entry = (
+                    "[Desktop Entry]\n"
+                    "Type=Application\n"
+                    "Name=FlexLux\n"
+                    f"Exec={exe}\n"
+                    "Hidden=false\n"
+                    "NoDisplay=false\n"
+                    "X-GNOME-Autostart-enabled=true\n")
+                os.makedirs(os.path.dirname(desktop_path), exist_ok=True)
+                with open(desktop_path, 'w') as f:
+                    f.write(entry)
+            else:
+                if os.path.exists(desktop_path):
+                    os.remove(desktop_path)
+
+    def _toggle_autostart(self):
+        enabled = self.autostart_action.isChecked()
+        try:
+            self._set_autostart(enabled)
+        except Exception as e:
+            print(f"Warning: Could not {'enable' if enabled else 'disable'} autostart: {e}")
+            self.autostart_action.setChecked(not enabled)
 
     def toggle_window(self):
         if self.isVisible():
