@@ -2,10 +2,9 @@ import sys
 import os
 import platform
 import logging
-from logging.handlers import RotatingFileHandler
 from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel, QMessageBox, QCheckBox
-from PyQt5.QtGui import QIcon, QColor, QPainter, QCursor
-from PyQt5.QtCore import Qt, QRect, QEvent, QTimer, QSettings
+from PyQt5.QtGui import QIcon, QCursor
+from PyQt5.QtCore import Qt, QEvent, QTimer, QSettings
 if platform.system() == "Darwin":
     import ctypes
     import subprocess
@@ -14,38 +13,12 @@ else:
     import screen_brightness_control as sbc
 
 from flexlux import VERSION
+from flexlux.overlay import OverlayWindow
+from flexlux.utils import resource_path
+
+log = logging.getLogger("FlexLux")
 
 _MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "__main__.py")
-
-
-def _setup_logging():
-    system = platform.system()
-    if system == "Windows":
-        log_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "FlexLux")
-    elif system == "Darwin":
-        log_dir = os.path.expanduser("~/Library/Logs")
-    else:
-        log_dir = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "FlexLux")
-    os.makedirs(log_dir, exist_ok=True)
-
-    logger = logging.getLogger("FlexLux")
-    logger.setLevel(logging.DEBUG)
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-
-    fh = RotatingFileHandler(os.path.join(log_dir, "FlexLux.log"), maxBytes=1_000_000, backupCount=1)
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    logger.addHandler(fh)
-
-    sh = logging.StreamHandler()
-    sh.setLevel(logging.WARNING)
-    sh.setFormatter(fmt)
-    logger.addHandler(sh)
-
-    return logger
-
-
-log = _setup_logging()
 
 
 if platform.system() == "Darwin":
@@ -281,46 +254,6 @@ if platform.system() == "Darwin":
         def cleanup(self):
             pass
 
-
-class OverlayWindow(QWidget):
-    def __init__(self, geometry=None):
-        super().__init__()
-        self.alpha = 0
-        self.setAttribute(Qt.WA_NoSystemBackground)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        
-        # Platform-specific window flags
-        if platform.system() == "Windows":
-            self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
-        elif platform.system() == "Darwin":  # macOS — Qt.Tool omitted so overlays persist when the app deactivates
-            self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus)
-        else:  # Linux
-            self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool | Qt.X11BypassWindowManagerHint)
-        
-        if geometry is None:
-            desktop = QApplication.desktop()
-            total_rect = QRect()
-            for i in range(desktop.screenCount()):
-                total_rect = total_rect.united(desktop.screenGeometry(i))
-            geometry = total_rect
-        
-        self.setGeometry(geometry)
-        self.show()
-
-    def setTransparency(self, alpha):
-        self.alpha = alpha
-        self.repaint()
-
-    def paintEvent(self, _):
-        painter = QPainter(self)
-        color = QColor(0, 0, 0, self.alpha)
-        painter.fillRect(self.rect(), color)
-
-def resource_path(relative_path):
-    if hasattr(sys, '_MEIPASS'):
-        return os.path.join(sys._MEIPASS, relative_path)
-    return os.path.join(os.path.abspath("."), relative_path)
 
 class FlexLuxApp(QWidget):
     def __init__(self):
