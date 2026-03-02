@@ -2,19 +2,20 @@
 # python3.11 -m venv venv
 # .\venv\Scripts\Activate (Windows) or source venv/bin/activate (Linux/macOS)
 # pip install PyQt5 pyinstaller Pillow screen_brightness_control
+# macOS external monitor brightness (optional): brew install m1ddc
 # Build commands:
 # Windows: pyinstaller --onefile --windowed --icon=assets/icon.png --add-data="assets/icon.png;assets/" flexlux.py
 # Linux/macOS: pyinstaller --onefile --windowed --icon=assets/icon.png --add-data="assets/icon.png:assets/" flexlux.py
 # Or use the spec file: pyinstaller flexlux.spec
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 import sys
 import os
 import platform
 import logging
 from logging.handlers import RotatingFileHandler
-from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel, QMessageBox
+from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel, QMessageBox, QCheckBox
 from PyQt5.QtGui import QIcon, QColor, QPainter, QCursor
 from PyQt5.QtCore import Qt, QRect, QEvent, QTimer, QSettings
 if platform.system() == "Darwin":
@@ -56,6 +57,15 @@ log = _setup_logging()
 
 
 if platform.system() == "Darwin":
+    class _CGPoint(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+    class _CGSize(ctypes.Structure):
+        _fields_ = [("width", ctypes.c_double), ("height", ctypes.c_double)]
+
+    class _CGRect(ctypes.Structure):
+        _fields_ = [("origin", _CGPoint), ("size", _CGSize)]
+
     class MacBrightnessControl:
         """macOS brightness control via DisplayServices (built-in) and m1ddc (external)."""
 
@@ -67,6 +77,14 @@ if platform.system() == "Darwin":
                 ctypes.POINTER(ctypes.c_uint32)]
             self._cg.CGDisplayIsBuiltin.argtypes = [ctypes.c_uint32]
             self._cg.CGDisplayIsBuiltin.restype = ctypes.c_int
+            self._cg.CGDisplayBounds.argtypes = [ctypes.c_uint32]
+            self._cg.CGDisplayBounds.restype = _CGRect
+            self._cg.CGDisplayVendorNumber.argtypes = [ctypes.c_uint32]
+            self._cg.CGDisplayVendorNumber.restype = ctypes.c_uint32
+            self._cg.CGDisplayModelNumber.argtypes = [ctypes.c_uint32]
+            self._cg.CGDisplayModelNumber.restype = ctypes.c_uint32
+            self._cg.CGDisplaySerialNumber.argtypes = [ctypes.c_uint32]
+            self._cg.CGDisplaySerialNumber.restype = ctypes.c_uint32
 
             self._ds = None
             try:
@@ -81,8 +99,68 @@ if platform.system() == "Darwin":
                 log.warning("DisplayServices not available: %s", e)
 
             self._m1ddc = shutil.which('m1ddc')
+            self._m1ddc_info = {}
+            if self._m1ddc:
+                self._parse_m1ddc_display_list()
             self._displays = []
             self._detect_displays()
+
+        def _parse_m1ddc_display_list(self):
+            """Parse 'm1ddc display list detailed' to get names, UUIDs, and EDID identifiers."""
+            try:
+                result = subprocess.run(
+                    [self._m1ddc, 'display', 'list', 'detailed'],
+                    capture_output=True, timeout=3, text=True)
+                if result.returncode != 0:
+                    return
+                current_idx = None
+                current = {}
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    if line.startswith('['):
+                        if current_idx is not None:
+                            self._m1ddc_info[current_idx] = current
+                        bracket_end = line.index(']')
+                        current_idx = int(line[1:bracket_end])
+                        rest = line[bracket_end + 2:]
+                        uuid_start = rest.rfind('(')
+                        if uuid_start != -1:
+                            product_name = rest[:uuid_start].strip()
+                            uuid = rest[uuid_start + 1:rest.rfind(')')]
+                        else:
+                            product_name = rest.strip()
+                            uuid = None
+                        if not product_name or product_name == '(null)':
+                            product_name = None
+                        current = {'name': product_name, 'uuid': uuid}
+                    elif line.startswith('- Vendor:') and current_idx is not None:
+                        parts = line.split('(')
+                        if len(parts) >= 2:
+                            current['vendor'] = int(parts[1].rstrip(')'), 16)
+                    elif line.startswith('- Model:') and current_idx is not None:
+                        parts = line.split('(')
+                        if len(parts) >= 2:
+                            current['model'] = int(parts[1].rstrip(')'), 16)
+                    elif line.startswith('- Serial:') and current_idx is not None:
+                        parts = line.split('(')
+                        if len(parts) >= 2:
+                            current['serial'] = int(parts[1].rstrip(')'), 16)
+                if current_idx is not None:
+                    self._m1ddc_info[current_idx] = current
+            except Exception as e:
+                log.debug("Could not parse m1ddc display list: %s", e)
+
+        def _find_m1ddc_match(self, cg_display_id):
+            """Match a CG display to an m1ddc display by EDID vendor/model/serial."""
+            cg_vendor = self._cg.CGDisplayVendorNumber(cg_display_id)
+            cg_model = self._cg.CGDisplayModelNumber(cg_display_id)
+            cg_serial = self._cg.CGDisplaySerialNumber(cg_display_id)
+            for idx, info in self._m1ddc_info.items():
+                if (info.get('vendor') == cg_vendor and
+                        info.get('model') == cg_model and
+                        info.get('serial') == cg_serial):
+                    return idx, info
+            return None, {}
 
         def _detect_displays(self):
             max_displays = 16
@@ -101,19 +179,53 @@ if platform.system() == "Darwin":
                 if is_builtin:
                     name = "Built-in Display"
                     method = 'displayservices' if self._ds else None
+                    uuid = None
                 else:
-                    name = f"External Display {external_idx}"
+                    m1ddc_idx, info = self._find_m1ddc_match(display_id)
+                    name = info.get('name') or f"External Display {external_idx}"
+                    uuid = info.get('uuid')
+                    method = None
+                    if self._m1ddc and m1ddc_idx is not None:
+                        try:
+                            probe = subprocess.run(
+                                [self._m1ddc, 'get', 'luminance', '-d', str(m1ddc_idx)],
+                                capture_output=True, timeout=3, text=True)
+                            if probe.returncode == 0 and probe.stdout.strip().isdigit():
+                                method = 'm1ddc'
+                                log.info("DDC/CI available for %s (m1ddc #%d)", name, m1ddc_idx)
+                            else:
+                                log.info("DDC/CI unavailable for %s (m1ddc #%d, rc=%d)", name, m1ddc_idx, probe.returncode)
+                        except Exception as e:
+                            log.info("DDC/CI probe failed for %s: %s", name, e)
+                    elif self._m1ddc:
+                        log.info("No m1ddc match found for CG display %d", display_id)
                     external_idx += 1
-                    method = 'm1ddc' if self._m1ddc else None
                 self._displays.append({
                     'id': display_id,
                     'name': name,
                     'builtin': is_builtin,
                     'method': method,
+                    'uuid': uuid,
+                    'm1ddc_idx': m1ddc_idx if not is_builtin else None,
                 })
 
         def list_monitors(self):
             return [d['name'] for d in self._displays]
+
+        def has_hardware_control(self, display_name):
+            for d in self._displays:
+                if d['name'] == display_name:
+                    return d['method'] is not None
+            return False
+
+        def get_display_bounds(self, display_name):
+            """Return (x, y, w, h) in points for the named display, or None."""
+            for d in self._displays:
+                if d['name'] == display_name:
+                    r = self._cg.CGDisplayBounds(d['id'])
+                    return (int(r.origin.x), int(r.origin.y),
+                            int(r.size.width), int(r.size.height))
+            return None
 
         def set_brightness(self, value, display=None):
             """Set brightness. value: 0-100."""
@@ -134,17 +246,11 @@ if platform.system() == "Darwin":
                     target['id'], ctypes.c_float(brightness))
                 if kr != 0:
                     log.warning("DisplayServicesSetBrightness returned %d", kr)
-            elif target['method'] == 'm1ddc':
-                ext_num = 1
-                for d in self._displays:
-                    if d is target:
-                        break
-                    if not d['builtin']:
-                        ext_num += 1
+            elif target['method'] == 'm1ddc' and target.get('m1ddc_idx') is not None:
                 try:
                     subprocess.run(
                         [self._m1ddc, 'set', 'luminance', str(int(value)),
-                         '-d', str(ext_num)],
+                         '-d', str(target['m1ddc_idx'])],
                         capture_output=True, timeout=2)
                 except Exception as e:
                     log.warning("m1ddc brightness set failed: %s", e)
@@ -164,8 +270,8 @@ class OverlayWindow(QWidget):
         # Platform-specific window flags
         if platform.system() == "Windows":
             self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
-        elif platform.system() == "Darwin":  # macOS
-            self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus)
+        elif platform.system() == "Darwin":  # macOS — Qt.Tool omitted so overlays persist when the app deactivates
+            self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus)
         else:  # Linux
             self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool | Qt.X11BypassWindowManagerHint)
         
@@ -203,12 +309,18 @@ class FlexLuxApp(QWidget):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(300)
         self._save_timer.timeout.connect(self._save_settings)
+        self._syncing = False
         self._detect_monitors()
         self._create_overlays()
         self.initUI()
         self._restore_settings()
         self.hide_timer = QTimer()
         self.hide_timer.timeout.connect(self.check_focus_and_hide)
+        self._refresh_timer = QTimer()
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(1000)
+        self._refresh_timer.timeout.connect(self._refresh_monitors)
+        QApplication.desktop().screenCountChanged.connect(lambda _: self._refresh_timer.start())
 
     def _detect_monitors(self):
         self._mac_brightness = None
@@ -226,16 +338,35 @@ class FlexLuxApp(QWidget):
             except Exception:
                 self.monitor_names = []
         self._has_hardware_monitors = len(self.monitor_names) > 0
+
+        if platform.system() == "Darwin" and self._mac_brightness:
+            self._hw_capable = [self._mac_brightness.has_hardware_control(n) for n in self.monitor_names]
+        elif self._has_hardware_monitors:
+            self._hw_capable = [True] * len(self.monitor_names)
+        else:
+            self._hw_capable = []
+
         if not self.monitor_names:
             self.monitor_names = ["Display"]
+            self._hw_capable = [False]
 
     def _create_overlays(self):
         desktop = QApplication.desktop()
         screen_count = desktop.screenCount()
         if len(self.monitor_names) > 1 and screen_count > 1:
             self.overlays = []
-            for i in range(screen_count):
-                self.overlays.append(OverlayWindow(desktop.screenGeometry(i)))
+            for mon_idx, name in enumerate(self.monitor_names):
+                qt_screen = mon_idx
+                if platform.system() == "Darwin" and self._mac_brightness:
+                    bounds = self._mac_brightness.get_display_bounds(name)
+                    if bounds:
+                        for s in range(screen_count):
+                            geo = desktop.screenGeometry(s)
+                            if bounds[0] == geo.x() and bounds[1] == geo.y():
+                                qt_screen = s
+                                break
+                qt_screen = min(qt_screen, screen_count - 1)
+                self.overlays.append(OverlayWindow(desktop.screenGeometry(qt_screen)))
         else:
             self.overlays = [OverlayWindow()]
 
@@ -245,12 +376,15 @@ class FlexLuxApp(QWidget):
             saved = self.settings.value(key, None)
             if saved is not None:
                 value = int(saved)
-                value = max(0, min(200, value))
+                upper = 200 if self._hw_capable[i] else 100
+                value = max(0, min(upper, value))
                 self.sliders[i].setValue(value)
 
     def _save_settings(self):
         for i, name in enumerate(self.monitor_names):
             self.settings.setValue(f"brightness/{name}", self.sliders[i].value())
+        if self.link_checkbox:
+            self.settings.setValue("link_monitors", self.link_checkbox.isChecked())
         self.settings.sync()
 
     def adjust_window_size(self):
@@ -264,39 +398,45 @@ class FlexLuxApp(QWidget):
             new_height = single_height
         self.resize(new_width, new_height)
 
-    def initUI(self):
-        layout = QVBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(2)
-
+    def _build_sliders(self, layout):
         if platform.system() == "Darwin":
             handle_w, handle_r, handle_m, groove_h, max_h = 24, 12, -8, 6, 40
         else:
             handle_w, handle_r, handle_m, groove_h, max_h = 50, 25, -20, 10, 70
 
-        slider_style = f"""
-        .QSlider {{
-            max-height: {max_h}px;
-        }}
-        QSlider::groove:horizontal {{
-            height: {groove_h}px;
-            background-color: darkgray;
-        }}
-        QSlider::handle:horizontal {{
-            width: {handle_w}px;
-            background-color: white;
-            border-radius: {handle_r}px;
-            margin: {handle_m}px 0;
-        }}
-        """
+        def _slider_style(hw_capable):
+            if hw_capable:
+                groove_bg = "background-color: darkgray;"
+            else:
+                groove_bg = ("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+                             "stop:0 darkgray, stop:0.499 darkgray, "
+                             "stop:0.5 #333333, stop:1 #333333);")
+            return f"""
+            .QSlider {{
+                max-height: {max_h}px;
+            }}
+            QSlider::groove:horizontal {{
+                height: {groove_h}px;
+                {groove_bg}
+            }}
+            QSlider::handle:horizontal {{
+                width: {handle_w}px;
+                background-color: white;
+                border-radius: {handle_r}px;
+                margin: {handle_m}px 0;
+            }}
+            """
 
         zone_label_style = "color: #555555; font-size: 9px; margin: 0; padding: 0;"
+        zone_label_disabled_style = "color: #222222; font-size: 9px; margin: 0; padding: 0;"
         mid_label_style = "color: #333333; font-size: 9px; margin: 0; padding: 0;"
 
         self.sliders = []
         multi = len(self.monitor_names) > 1
 
         for i, name in enumerate(self.monitor_names):
+            hw = self._hw_capable[i]
+
             if multi:
                 label = QLabel(name)
                 label.setStyleSheet("color: #888888; font-size: 10px; margin: 0; padding: 0;")
@@ -305,7 +445,7 @@ class FlexLuxApp(QWidget):
             slider = QSlider(Qt.Horizontal, self)
             slider.setRange(0, 200)
             slider.setValue(100)
-            slider.setStyleSheet(slider_style)
+            slider.setStyleSheet(_slider_style(hw))
             slider.valueChanged[int].connect(lambda value, idx=i: self._snap_and_update(idx, value))
             layout.addWidget(slider)
 
@@ -321,13 +461,52 @@ class FlexLuxApp(QWidget):
             lbl_mid.setStyleSheet(mid_label_style)
             lbl_natural = QLabel("Natural")
             lbl_natural.setAlignment(Qt.AlignCenter)
-            lbl_natural.setStyleSheet(zone_label_style)
+            lbl_natural.setStyleSheet(zone_label_style if hw else zone_label_disabled_style)
             zone_row.addWidget(lbl_artificial, 1)
             zone_row.addWidget(lbl_mid, 0)
             zone_row.addWidget(lbl_natural, 1)
             layout.addLayout(zone_row)
 
             self.sliders.append(slider)
+
+        self.link_checkbox = None
+        if multi:
+            self.link_checkbox = QCheckBox("Link Monitors")
+            self.link_checkbox.setStyleSheet("color: #888888; font-size: 10px; margin-top: 4px;")
+            self.link_checkbox.setChecked(self.settings.value("link_monitors", True, type=bool))
+            layout.addWidget(self.link_checkbox)
+
+    def _clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                self._clear_layout(item.layout())
+
+    def _refresh_monitors(self):
+        log.info("Screen configuration changed, refreshing monitors")
+        self._save_settings()
+
+        for overlay in self.overlays:
+            overlay.close()
+
+        self._detect_monitors()
+        self._create_overlays()
+
+        layout = self.layout()
+        self._clear_layout(layout)
+        self._build_sliders(layout)
+
+        self.adjust_window_size()
+        self._restore_settings()
+
+    def initUI(self):
+        layout = QVBoxLayout()
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(2)
+
+        self._build_sliders(layout)
 
         self.setStyleSheet("background-color: #111111;")
         self.setLayout(layout)
@@ -366,13 +545,6 @@ class FlexLuxApp(QWidget):
         self.tray_icon.show()
         self.tray_icon.activated.connect(self.on_tray_icon_activated)
 
-        for name in self.monitor_names:
-            try:
-                if self._has_hardware_monitors:
-                    self._set_hardware_brightness(self.min_brightness, name)
-            except Exception as e:
-                log.warning("Could not initialize brightness for %s: %s", name, e)
-
         # Platform-specific event handling
         if platform.system() != "Darwin":  # Not macOS
             QApplication.instance().installEventFilter(self)
@@ -387,28 +559,39 @@ class FlexLuxApp(QWidget):
     _SNAP_THRESHOLD = 5
 
     def _snap_and_update(self, monitor_idx, value):
+        if not self._hw_capable[monitor_idx] and value > 100:
+            self.sliders[monitor_idx].setValue(100)
+            return
         if value != 100 and abs(value - 100) <= self._SNAP_THRESHOLD:
             self.sliders[monitor_idx].setValue(100)
             return
         self._on_slider_changed(monitor_idx, value)
+        if self.link_checkbox and self.link_checkbox.isChecked() and not self._syncing:
+            self._syncing = True
+            for i, s in enumerate(self.sliders):
+                if i != monitor_idx:
+                    clamped = min(value, 200 if self._hw_capable[i] else 100)
+                    s.setValue(clamped)
+            self._syncing = False
 
     def _on_slider_changed(self, monitor_idx, value):
         self._save_timer.start()
         monitor_name = self.monitor_names[monitor_idx]
+        hw = self._hw_capable[monitor_idx]
         overlay = self.overlays[min(monitor_idx, len(self.overlays) - 1)]
         try:
             if value == 100:
-                if self._has_hardware_monitors:
+                if hw:
                     self._set_hardware_brightness(self.min_brightness, monitor_name)
                 overlay.setTransparency(0)
             elif value > 100:
-                if self._has_hardware_monitors:
+                if hw:
                     brightness_percent = (value - 100) / 100
                     new_brightness = int(self.min_brightness + (self.max_brightness - self.min_brightness) * brightness_percent)
                     self._set_hardware_brightness(new_brightness, monitor_name)
                 overlay.setTransparency(0)
             else:
-                if self._has_hardware_monitors:
+                if hw:
                     self._set_hardware_brightness(self.min_brightness, monitor_name)
                 darkness_percent = (100 - value) / 100
                 max_darkness = 0.9

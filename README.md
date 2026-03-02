@@ -120,13 +120,18 @@ Right-click the tray icon for additional options.
 
 - **Windows**: Full functionality supported
 - **Linux**: Requires X11 window system. Wayland support may be limited
-- **macOS**: May require accessibility permissions for overlay functionality
+- **macOS**: Artificial darkening works out of the box. Hardware brightness control for the built-in display uses the native DisplayServices framework. For **external monitors**, install [`m1ddc`](https://github.com/waydabber/m1ddc) to enable hardware brightness via DDC/CI:
+  ```bash
+  brew install m1ddc
+  ```
+  This is optional — if `m1ddc` is not installed, or if a display doesn't support DDC/CI (common with TVs), the hardware brightness side of the slider will be grayed out and the artificial darkening overlay still works normally.
 
 ## Troubleshooting
 
 If brightness control doesn't work:
 - Ensure your display drivers are up to date
 - On Linux, you may need to run with elevated privileges: `sudo python flexlux.py`
+- On macOS, if the hardware brightness slider is grayed out for an external monitor, install `m1ddc` (`brew install m1ddc`) and restart FlexLux. If it's still grayed out, your display likely doesn't support DDC/CI
 - Check that `screen_brightness_control` supports your hardware
 
 ## License
