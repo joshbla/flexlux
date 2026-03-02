@@ -255,6 +255,37 @@ if platform.system() == "Darwin":
                 except Exception as e:
                     log.warning("m1ddc brightness set failed: %s", e)
 
+        def get_brightness(self, display=None):
+            """Get current brightness (0-100), or None on failure."""
+            target = None
+            if display:
+                for d in self._displays:
+                    if d['name'] == display:
+                        target = d
+                        break
+            if target is None and self._displays:
+                target = self._displays[0]
+            if target is None:
+                return None
+
+            if target['method'] == 'displayservices':
+                brightness = ctypes.c_float()
+                kr = self._ds.DisplayServicesGetBrightness(
+                    target['id'], ctypes.byref(brightness))
+                if kr == 0:
+                    return int(round(brightness.value * 100))
+                return None
+            elif target['method'] == 'm1ddc' and target.get('m1ddc_idx') is not None:
+                try:
+                    result = subprocess.run(
+                        [self._m1ddc, 'get', 'luminance', '-d', str(target['m1ddc_idx'])],
+                        capture_output=True, timeout=3, text=True)
+                    if result.returncode == 0 and result.stdout.strip().isdigit():
+                        return int(result.stdout.strip())
+                except Exception as e:
+                    log.warning("m1ddc brightness get failed: %s", e)
+            return None
+
         def cleanup(self):
             pass
 
@@ -321,6 +352,11 @@ class FlexLuxApp(QWidget):
         self._refresh_timer.setInterval(1000)
         self._refresh_timer.timeout.connect(self._refresh_monitors)
         QApplication.desktop().screenCountChanged.connect(lambda _: self._refresh_timer.start())
+        self._poll_timer = QTimer()
+        self._poll_timer.setInterval(self._POLL_INTERVAL_MS)
+        self._poll_timer.timeout.connect(self._poll_brightness)
+        if any(self._hw_capable):
+            self._poll_timer.start()
 
     def _detect_monitors(self):
         self._mac_brightness = None
@@ -501,6 +537,10 @@ class FlexLuxApp(QWidget):
         self.adjust_window_size()
         self._restore_settings()
 
+        self._poll_timer.stop()
+        if any(self._hw_capable):
+            self._poll_timer.start()
+
     def initUI(self):
         layout = QVBoxLayout()
         layout.setContentsMargins(8, 8, 8, 8)
@@ -556,7 +596,76 @@ class FlexLuxApp(QWidget):
         else:
             sbc.set_brightness(value, display=display)
 
+    def _get_hardware_brightness(self, display):
+        """Read current hardware brightness (0-100), or None if unavailable."""
+        try:
+            if platform.system() == "Darwin" and self._mac_brightness:
+                return self._mac_brightness.get_brightness(display=display)
+            else:
+                levels = sbc.get_brightness(display=display)
+                if isinstance(levels, list):
+                    return levels[0] if levels else None
+                return levels
+        except Exception as e:
+            log.debug("Could not read brightness for %s: %s", display, e)
+            return None
+
+    def _expected_hw_from_slider(self, monitor_idx):
+        """Compute expected hardware brightness from current slider position."""
+        value = self.sliders[monitor_idx].value()
+        if value <= 100:
+            return self.min_brightness
+        brightness_percent = (value - 100) / 100
+        return int(self.min_brightness + (self.max_brightness - self.min_brightness) * brightness_percent)
+
+    def _slider_from_hw(self, hw_brightness):
+        """Convert hardware brightness (0-100) to slider value (100-200)."""
+        if hw_brightness <= self.min_brightness:
+            return 100
+        percent = (hw_brightness - self.min_brightness) / (self.max_brightness - self.min_brightness)
+        return 100 + int(round(percent * 100))
+
+    def _set_poll_speed(self, fast=False):
+        """Switch between fast (panel open) and slow (background) polling."""
+        if not hasattr(self, '_poll_timer'):
+            return
+        interval = self._POLL_INTERVAL_FAST_MS if fast else self._POLL_INTERVAL_MS
+        self._poll_timer.setInterval(interval)
+        if any(self._hw_capable):
+            self._poll_timer.start()
+
+    def _poll_brightness(self):
+        """Detect external brightness changes and update sliders accordingly."""
+        for i, name in enumerate(self.monitor_names):
+            if not self._hw_capable[i]:
+                continue
+            actual = self._get_hardware_brightness(name)
+            if actual is None:
+                continue
+            expected = self._expected_hw_from_slider(i)
+            if abs(actual - expected) <= self._POLL_THRESHOLD:
+                continue
+
+            new_slider = self._slider_from_hw(actual)
+            log.info("External brightness change on %s: expected hw=%d, actual=%d, slider -> %d",
+                     name, expected, actual, new_slider)
+
+            if self.link_checkbox and self.link_checkbox.isChecked():
+                self.link_checkbox.setChecked(False)
+
+            self.sliders[i].blockSignals(True)
+            self.sliders[i].setValue(new_slider)
+            self.sliders[i].blockSignals(False)
+
+            overlay = self.overlays[min(i, len(self.overlays) - 1)]
+            overlay.setTransparency(0)
+
+            self._save_timer.start()
+
     _SNAP_THRESHOLD = 5
+    _POLL_INTERVAL_MS = 5000
+    _POLL_INTERVAL_FAST_MS = 500
+    _POLL_THRESHOLD = 3
 
     def _snap_and_update(self, monitor_idx, value):
         if not self._hw_capable[monitor_idx] and value > 100:
@@ -576,6 +685,8 @@ class FlexLuxApp(QWidget):
 
     def _on_slider_changed(self, monitor_idx, value):
         self._save_timer.start()
+        if hasattr(self, '_poll_timer'):
+            self._poll_timer.start()
         monitor_name = self.monitor_names[monitor_idx]
         hw = self._hw_capable[monitor_idx]
         overlay = self.overlays[min(monitor_idx, len(self.overlays) - 1)]
@@ -719,11 +830,13 @@ class FlexLuxApp(QWidget):
     def toggle_window(self):
         if self.isVisible():
             self.hide()
+            self._set_poll_speed(fast=False)
         else:
             self.show()
             self.activateWindow()
             self.raise_()
             self.updatePosition()
+            self._set_poll_speed(fast=True)
 
     def on_tray_icon_activated(self, reason):
         if reason == QSystemTrayIcon.Trigger:
@@ -754,10 +867,10 @@ class FlexLuxApp(QWidget):
         self.move(x, y)
 
     def check_focus_and_hide(self):
-        # Check if the window or any of its children has focus
         if not self.isActiveWindow() and not any(w.hasFocus() for w in self.findChildren(QWidget)):
             self.hide()
             self.hide_timer.stop()
+            self._set_poll_speed(fast=False)
 
     def eventFilter(self, obj, event):
         if platform.system() == "Darwin":  # macOS needs different handling
@@ -771,6 +884,8 @@ class FlexLuxApp(QWidget):
         return super().eventFilter(obj, event)
 
     def closeEvent(self, event):
+        if hasattr(self, '_poll_timer'):
+            self._poll_timer.stop()
         if hasattr(self, '_mac_brightness') and self._mac_brightness:
             self._mac_brightness.cleanup()
         for overlay in self.overlays:
