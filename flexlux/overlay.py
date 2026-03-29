@@ -10,10 +10,14 @@ from flexlux.platform_ui import get_ui_config
 log = logging.getLogger("FlexLux")
 
 
-def _apply_macos_overlay_config(widget):
+def _apply_macos_overlay_config(widget, target_geometry):
     """Set NSWindow properties so the overlay stays above fullscreen content
     and is invisible in Mission Control.  Called after the Qt window is fully
-    realised; the Qt-level flags are left untouched."""
+    realised; the Qt-level flags are left untouched.
+
+    Also forces the NSWindow frame to *target_geometry* (a QRect in Qt logical
+    coordinates) via Cocoa, bypassing macOS constraints that can shrink
+    frameless Qt windows to less than full-screen size."""
     import ctypes
 
     try:
@@ -57,7 +61,32 @@ def _apply_macos_overlay_config(widget):
     send_bool(ns_window, objc.sel_registerName(b'setHidesOnDeactivate:'), False)
     send_bool(ns_window, objc.sel_registerName(b'setIgnoresMouseEvents:'), True)
 
-    log.info("macOS overlay: NSWindow %#x  level=1000  behavior=337", ns_window)
+    # Force NSWindow frame to the exact target screen geometry.
+    # macOS can silently constrain frameless Qt windows to ~20px less than
+    # full-screen size; setting the frame at the Cocoa level bypasses this.
+    class CGPoint(ctypes.Structure):
+        _fields_ = [('x', ctypes.c_double), ('y', ctypes.c_double)]
+
+    class CGSize(ctypes.Structure):
+        _fields_ = [('width', ctypes.c_double), ('height', ctypes.c_double)]
+
+    class CGRect(ctypes.Structure):
+        _fields_ = [('origin', CGPoint), ('size', CGSize)]
+
+    primary_h = QApplication.primaryScreen().geometry().height()
+    cocoa_x = float(target_geometry.x())
+    cocoa_y = float(primary_h - target_geometry.y() - target_geometry.height())
+    frame = CGRect(
+        CGPoint(cocoa_x, cocoa_y),
+        CGSize(float(target_geometry.width()), float(target_geometry.height())))
+
+    send_frame = ctypes.cast(
+        objc.objc_msgSend,
+        ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, CGRect, ctypes.c_bool))
+    send_frame(ns_window, objc.sel_registerName(b'setFrame:display:'), frame, True)
+
+    log.info("macOS overlay: NSWindow %#x  level=1000  behavior=337  frame=(%g,%g %gx%g)",
+             ns_window, cocoa_x, cocoa_y, target_geometry.width(), target_geometry.height())
 
 
 class OverlayWindow(QWidget):
@@ -77,11 +106,13 @@ class OverlayWindow(QWidget):
                 total_rect = total_rect.united(desktop.screenGeometry(i))
             geometry = total_rect
 
+        self._target_geometry = geometry
         self.setGeometry(geometry)
         self.show()
 
         if platform.system() == 'Darwin':
-            QTimer.singleShot(0, lambda: _apply_macos_overlay_config(self))
+            geo = self._target_geometry
+            QTimer.singleShot(0, lambda: _apply_macos_overlay_config(self, geo))
 
     def setTransparency(self, alpha):
         self.alpha = alpha

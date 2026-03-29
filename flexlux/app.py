@@ -254,10 +254,13 @@ class FlexLuxApp(QWidget):
         self.autostart_action.triggered.connect(self._toggle_autostart)
         self.about_action = QAction("About", self)
         self.about_action.triggered.connect(self._show_about)
+        self.reset_action = QAction("Reset Settings", self)
+        self.reset_action.triggered.connect(self._reset_settings)
         self.quit_action = QAction("Quit", self)
         self.quit_action.triggered.connect(QApplication.instance().quit)
         self.tray_menu.addAction(self.autostart_action)
         self.tray_menu.addAction(self.about_action)
+        self.tray_menu.addAction(self.reset_action)
         self.tray_menu.addSeparator()
         self.tray_menu.addAction(self.quit_action)
         if not self._ui.use_manual_tray_menu:
@@ -411,6 +414,22 @@ class FlexLuxApp(QWidget):
             '<p><a href="https://github.com/joshbla/flexlux">github.com/joshbla/flexlux</a><br>'
             '<a href="https://github.com/joshbla/flexlux/issues">Report issues here</a></p>'
         )
+
+    def _reset_settings(self):
+        reply = QMessageBox.question(
+            self, "Reset Settings",
+            "This will reset all saved settings to defaults and restart FlexLux. Continue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.settings.clear()
+        self.settings.sync()
+        for i, slider in enumerate(self.sliders):
+            slider.setValue(100)
+        if self.link_checkbox:
+            self.link_checkbox.setChecked(True)
+        self.adjust_window_size()
 
     def toggle_window(self):
         if self.isVisible():
