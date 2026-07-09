@@ -109,6 +109,9 @@ jobs:
     
     steps:
     - uses: actions/checkout@v4
+      with:
+        # Full history so the commit list since the previous tag can be generated.
+        fetch-depth: 0
     
     - name: Download all artifacts
       uses: actions/download-artifact@v4
@@ -120,28 +123,45 @@ jobs:
         echo "Downloaded artifacts:"
         ls -R artifacts/
     
+    - name: Generate release body
+      run: |
+        if git describe --tags --abbrev=0 "${{ github.ref_name }}^" > prev_tag.txt 2>/dev/null; then
+          PREV_TAG=$(cat prev_tag.txt)
+          RANGE="$PREV_TAG..${{ github.ref_name }}"
+        else
+          # First release: list every commit reachable from the tag.
+          RANGE="${{ github.ref_name }}"
+        fi
+        {
+          echo "Cross-platform brightness control application with system tray interface."
+          echo ""
+          echo "### Downloads"
+          echo '- **Windows**: Download `flexlux-windows.exe`'
+          echo '- **Linux**: Download `flexlux-linux` (make executable with `chmod +x`)'
+          echo '- **macOS**: Download and extract `flexlux-macos.zip`'
+          echo ""
+          echo "### What's Changed"
+          git log --pretty=format:'- %s' "$RANGE"
+          echo ""
+          echo ""
+          echo "### Requirements"
+          echo "- Windows: Windows 10 or later"
+          echo "- Linux: X11 display server"
+          echo "- macOS: macOS 10.15 or later (may require security permissions)"
+        } > release_body.md
+        echo "Generated release body:"
+        cat release_body.md
+    
     - name: Create Release
       uses: softprops/action-gh-release@v2
       with:
         draft: false
         prerelease: false
         name: FlexLux ${{ github.ref_name }}
-        # What's-new content is auto-generated from the commits since the
-        # previous tag; the body below is static download/requirements
-        # boilerplate that the generated notes are appended to.
+        # The body is generated from the commits since the previous tag;
+        # generate_release_notes appends GitHub's compare link and any PR list.
         generate_release_notes: true
-        body: |
-          Cross-platform brightness control application with system tray interface.
-          
-          ### Downloads
-          - **Windows**: Download `flexlux-windows.exe`
-          - **Linux**: Download `flexlux-linux` (make executable with `chmod +x`)
-          - **macOS**: Download and extract `flexlux-macos.zip`
-          
-          ### Requirements
-          - Windows: Windows 10 or later
-          - Linux: X11 display server
-          - macOS: macOS 10.15 or later (may require security permissions)
+        body_path: release_body.md
         files: |
           artifacts/flexlux-windows/flexlux-windows.exe
           artifacts/flexlux-linux/flexlux-linux
