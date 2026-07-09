@@ -4,7 +4,7 @@ from PyQt5.QtGui import QIcon, QCursor
 from PyQt5.QtCore import Qt, QEvent, QTimer, QSettings
 
 from flexlux import VERSION
-from flexlux.brightness import get_backend
+from flexlux.brightness import get_backend, get_key_interceptor
 from flexlux.overlay import OverlayWindow
 from flexlux.platform_ui import get_ui_config
 from flexlux.utils import resource_path
@@ -24,6 +24,8 @@ class FlexLuxApp(QWidget):
         self._save_timer.setInterval(300)
         self._save_timer.timeout.connect(self._save_settings)
         self._syncing = False
+        self._key_interceptor = None
+        self._accessibility_notified = False
         self._detect_monitors()
         self._create_overlays()
         self.initUI()
@@ -40,6 +42,15 @@ class FlexLuxApp(QWidget):
         self._poll_timer.timeout.connect(self._poll_brightness)
         if any(self._hw_capable):
             self._poll_timer.start()
+
+        interceptor = get_key_interceptor()
+        if interceptor is not None:
+            interceptor.brightness_key_pressed.connect(self._on_brightness_key)
+            if interceptor.start():
+                self._key_interceptor = interceptor
+                self._update_key_intercept_state()
+            elif interceptor.failure_reason == "permission":
+                self._notify_accessibility_permission()
 
     def _detect_monitors(self):
         self._backend = None
@@ -93,11 +104,17 @@ class FlexLuxApp(QWidget):
         for i, name in enumerate(self.monitor_names):
             key = f"brightness/{name}"
             saved = self.settings.value(key, None)
-            if saved is not None:
+            if saved is None:
+                continue
+            try:
                 value = int(saved)
-                upper = 200 if self._hw_capable[i] else 100
-                value = max(0, min(upper, value))
-                self.sliders[i].setValue(value)
+            except (ValueError, TypeError):
+                log.warning("Ignoring corrupt saved brightness value for %s: %r",
+                            name, saved)
+                continue
+            upper = 200 if self._hw_capable[i] else 100
+            value = max(0, min(upper, value))
+            self.sliders[i].setValue(value)
 
     def _save_settings(self):
         for i, name in enumerate(self.monitor_names):
@@ -226,6 +243,12 @@ class FlexLuxApp(QWidget):
         if any(self._hw_capable):
             self._poll_timer.start()
 
+        # Reconcile key interception against the new monitor set. We do not
+        # construct the interceptor here if it was never created at startup —
+        # only refresh its intercept state if it already exists.
+        if self._key_interceptor is not None:
+            self._update_key_intercept_state()
+
     def initUI(self):
         layout = QVBoxLayout()
         layout.setContentsMargins(8, 8, 8, 8)
@@ -338,10 +361,76 @@ class FlexLuxApp(QWidget):
 
             self._save_timer.start()
 
+        self._update_key_intercept_state()
+
+    def _notify_accessibility_permission(self):
+        """One-time non-blocking tray notification prompting for Accessibility.
+
+        Shown at most once per app run, only on macOS, only when the
+        interceptor failed specifically due to a missing Accessibility grant.
+        """
+        if self._accessibility_notified:
+            return
+        self._accessibility_notified = True
+        self.tray_icon.showMessage(
+            "FlexLux: Accessibility permission needed",
+            "Grant FlexLux Accessibility under System Settings > Privacy & "
+            "Security > Accessibility to enable brightness-key support.",
+            QSystemTrayIcon.Warning, 5000)
+
+    def _update_key_intercept_state(self):
+        """Update which brightness key directions the interceptor should suppress.
+
+        Keys are intercepted if ANY hardware-capable monitor's state requires
+        it: down is intercepted whenever any such slider is at or below the
+        overlay/hardware boundary (software handles dimming), and up is
+        intercepted whenever any such slider is in the overlay zone (so the OS
+        does not fight the overlay by raising hardware brightness).
+        """
+        if not self._key_interceptor:
+            return
+        intercept_down = False
+        intercept_up = False
+        for i, name in enumerate(self.monitor_names):
+            if not self._hw_capable[i]:
+                continue
+            value = self.sliders[i].value()
+            if value < 100:
+                intercept_up = True
+            if value <= 100:
+                intercept_down = True
+        self._key_interceptor.set_state(intercept_down, intercept_up)
+
+    def _on_brightness_key(self, direction, intercepted):
+        """Handle a brightness key press detected by the event tap."""
+        if intercepted:
+            linked = self.link_checkbox is not None and self.link_checkbox.isChecked()
+            for i, name in enumerate(self.monitor_names):
+                if not self._hw_capable[i]:
+                    continue
+                value = self.sliders[i].value()
+                if direction == "down":
+                    new_value = max(self._KEY_MIN_VALUE, value - self._KEY_STEP)
+                else:
+                    new_value = min(100, value + self._KEY_STEP)
+                # When monitors are linked, _snap_and_update propagates the
+                # value to every other slider, so driving one is enough and
+                # avoids the propagation loop double-applying the step.
+                self.sliders[i].setValue(new_value)
+                if linked:
+                    return
+        else:
+            # The OS changed hardware brightness itself. Wait briefly for the
+            # new value to settle on the hardware before polling it back so we
+            # read the post-key state rather than a mid-transition one.
+            QTimer.singleShot(200, self._poll_brightness)
+
     _SNAP_THRESHOLD = 5
     _POLL_INTERVAL_MS = 5000
     _POLL_INTERVAL_FAST_MS = 500
     _POLL_THRESHOLD = 3
+    _KEY_STEP = 6
+    _KEY_MIN_VALUE = 0
 
     def _snap_and_update(self, monitor_idx, value):
         if not self._hw_capable[monitor_idx] and value > 100:
@@ -395,6 +484,7 @@ class FlexLuxApp(QWidget):
                 if hw:
                     self._set_hardware_brightness(self.min_brightness, monitor_name)
             self._recalc_overlay(self._overlay_for_monitor[monitor_idx])
+            self._update_key_intercept_state()
         except Exception as e:
             log.warning("Could not change brightness for %s: %s", monitor_name, e)
 
@@ -487,6 +577,8 @@ class FlexLuxApp(QWidget):
         return super().eventFilter(obj, event)
 
     def closeEvent(self, event):
+        if self._key_interceptor is not None:
+            self._key_interceptor.stop()
         if hasattr(self, '_poll_timer'):
             self._poll_timer.stop()
         if hasattr(self, '_backend') and self._backend:

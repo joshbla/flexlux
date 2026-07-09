@@ -1,5 +1,9 @@
+import logging
 import platform
 from typing import Protocol, Optional
+
+
+log = logging.getLogger("FlexLux")
 
 
 class BrightnessBackend(Protocol):
@@ -20,3 +24,21 @@ def get_backend() -> BrightnessBackend:
     else:
         from flexlux.brightness.sbc_backend import SbcBrightnessBackend
         return SbcBrightnessBackend()
+
+
+def get_key_interceptor():
+    """Return a brightness-key interceptor for this platform, or None.
+
+    On Darwin a constructed (but not yet started) MacBrightnessKeyInterceptor
+    is returned. On every other platform None is returned. Construction is
+    cheap; callers own start()/stop() lifecycle. Returns None if construction
+    fails so callers can degrade gracefully without touching platform APIs.
+    """
+    if platform.system() != "Darwin":
+        return None
+    try:
+        from flexlux.brightness.mac_keys import MacBrightnessKeyInterceptor
+        return MacBrightnessKeyInterceptor()
+    except Exception as e:
+        log.warning("Could not create brightness key interceptor: %s", e)
+        return None
