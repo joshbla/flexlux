@@ -1,3 +1,6 @@
 PyQt5>=5.15.0,<6
 screen-brightness-control>=0.18.0,<1
 pyinstaller>=5.0.0,<7
+# Build-time only: PyInstaller uses Pillow to convert assets/icon.png to
+# .icns (macOS) and .ico (Windows) app icons. Not imported at runtime.
+Pillow>=8.0.0,<12
