@@ -15,6 +15,8 @@ def setup_logging():
     os.makedirs(log_dir, exist_ok=True)
 
     logger = logging.getLogger("FlexLux")
+    if logger.handlers:
+        return
     logger.setLevel(logging.DEBUG)
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 

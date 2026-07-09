@@ -18,6 +18,7 @@ a = Analysis(
     hiddenimports=[
         'screen_brightness_control',
         'flexlux.brightness.mac',
+        'flexlux.brightness.mac_keys',
         'flexlux.brightness.sbc_backend',
     ],
     hookspath=[],

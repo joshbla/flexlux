@@ -36,7 +36,7 @@ These scripts automatically create a virtual environment, install dependencies, 
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/flexlux.git
+git clone https://github.com/joshbla/flexlux.git
 cd flexlux
 ```
 

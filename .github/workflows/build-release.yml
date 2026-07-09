@@ -24,10 +24,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
     
@@ -108,7 +108,7 @@ jobs:
       contents: write
     
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     
     - name: Download all artifacts
       uses: actions/download-artifact@v4
@@ -121,26 +121,22 @@ jobs:
         ls -R artifacts/
     
     - name: Create Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         draft: false
         prerelease: false
         name: FlexLux ${{ github.ref_name }}
+        # What's-new content is auto-generated from the commits since the
+        # previous tag; the body below is static download/requirements
+        # boilerplate that the generated notes are appended to.
+        generate_release_notes: true
         body: |
-          ## FlexLux ${{ github.ref_name }}
-          
           Cross-platform brightness control application with system tray interface.
           
           ### Downloads
           - **Windows**: Download `flexlux-windows.exe`
           - **Linux**: Download `flexlux-linux` (make executable with `chmod +x`)
           - **macOS**: Download and extract `flexlux-macos.zip`
-          
-          ### What's New
-          - Cross-platform support (Windows, Linux, macOS)
-          - Improved error handling
-          - Platform-specific optimizations
-          - Enhanced documentation
           
           ### Requirements
           - Windows: Windows 10 or later
