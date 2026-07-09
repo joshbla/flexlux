@@ -1,6 +1,7 @@
 import ctypes
 import subprocess
 import shutil
+import threading
 import logging
 
 log = logging.getLogger("FlexLux")
@@ -16,6 +17,58 @@ class _CGSize(ctypes.Structure):
 
 class _CGRect(ctypes.Structure):
     _fields_ = [("origin", _CGPoint), ("size", _CGSize)]
+
+
+class _CoalescingDdcWriter:
+    """Runs m1ddc 'set luminance' commands on a background thread.
+
+    Slider drags emit many brightness changes per second; each m1ddc call is a
+    blocking subprocess. This writer keeps only the LATEST pending value per
+    display and applies values sequentially off the UI thread, so dragging
+    never spawns more than one in-flight subprocess and never blocks the UI.
+
+    ddc_lock serializes DDC bus access between this writer and synchronous
+    reads (get_brightness) so concurrent get/set cannot interleave on the wire.
+    """
+
+    def __init__(self, m1ddc_path, ddc_lock):
+        self._m1ddc = m1ddc_path
+        self._ddc_lock = ddc_lock
+        self._pending = {}
+        self._cond = threading.Condition()
+        self._stop_requested = False
+        self._thread = threading.Thread(
+            target=self._run, name="flexlux-ddc-writer", daemon=True)
+        self._thread.start()
+
+    def submit(self, m1ddc_idx, value):
+        with self._cond:
+            self._pending[m1ddc_idx] = value
+            self._cond.notify()
+
+    def stop(self):
+        """Flush remaining writes, then stop the thread."""
+        with self._cond:
+            self._stop_requested = True
+            self._cond.notify()
+        self._thread.join(timeout=5)
+
+    def _run(self):
+        while True:
+            with self._cond:
+                while not self._pending and not self._stop_requested:
+                    self._cond.wait()
+                if not self._pending and self._stop_requested:
+                    return
+                idx, value = self._pending.popitem()
+            try:
+                with self._ddc_lock:
+                    subprocess.run(
+                        [self._m1ddc, 'set', 'luminance', str(int(value)),
+                         '-d', str(idx)],
+                        capture_output=True, timeout=2)
+            except Exception as e:
+                log.warning("m1ddc brightness set failed: %s", e)
 
 
 class MacBrightnessBackend:
@@ -42,24 +95,33 @@ class MacBrightnessBackend:
         self._cg.CGDisplaySerialNumber.argtypes = [ctypes.c_uint32]
         self._cg.CGDisplaySerialNumber.restype = ctypes.c_uint32
 
+        # Configure DisplayServices on a local first and publish to self._ds
+        # only once every symbol is typed, so a partially-configured library
+        # can never be called through untyped function pointers.
         self._ds = None
         try:
-            self._ds = ctypes.cdll.LoadLibrary(
+            ds = ctypes.cdll.LoadLibrary(
                 '/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices')
-            self._ds.DisplayServicesSetBrightness.argtypes = [ctypes.c_uint32, ctypes.c_float]
-            self._ds.DisplayServicesSetBrightness.restype = ctypes.c_int
-            self._ds.DisplayServicesGetBrightness.argtypes = [
+            ds.DisplayServicesSetBrightness.argtypes = [ctypes.c_uint32, ctypes.c_float]
+            ds.DisplayServicesSetBrightness.restype = ctypes.c_int
+            ds.DisplayServicesGetBrightness.argtypes = [
                 ctypes.c_uint32, ctypes.POINTER(ctypes.c_float)]
-            self._ds.DisplayServicesGetBrightness.restype = ctypes.c_int
+            ds.DisplayServicesGetBrightness.restype = ctypes.c_int
+            self._ds = ds
         except (OSError, AttributeError) as e:
             log.warning("DisplayServices not available: %s", e)
 
         self._m1ddc = shutil.which('m1ddc')
         self._m1ddc_info = {}
-        if self._m1ddc:
+        if self._m1ddc is not None:
             self._parse_m1ddc_display_list()
+        self._ddc_lock = threading.Lock()
+        self._ddc_writer = None
+        if self._m1ddc is not None:
+            self._ddc_writer = _CoalescingDdcWriter(self._m1ddc, self._ddc_lock)
         self._displays = []
         self._detect_displays()
+        self._dedupe_display_names()
 
     def _parse_m1ddc_display_list(self):
         """Parse 'm1ddc display list detailed' to get names, UUIDs, and EDID identifiers."""
@@ -86,7 +148,7 @@ class MacBrightnessBackend:
                     else:
                         product_name = rest.strip()
                         uuid = None
-                    if not product_name or product_name == '(null)':
+                    if product_name == '' or product_name == '(null)':
                         product_name = None
                     current = {'name': product_name, 'uuid': uuid}
                 elif line.startswith('- Vendor:') and current_idx is not None:
@@ -118,6 +180,22 @@ class MacBrightnessBackend:
                 return idx, info
         return None, {}
 
+    def _probe_ddc(self, display):
+        """Probe one display for DDC/CI luminance support (blocking)."""
+        m1ddc_idx = display['m1ddc_idx']
+        try:
+            probe = subprocess.run(
+                [self._m1ddc, 'get', 'luminance', '-d', str(m1ddc_idx)],
+                capture_output=True, timeout=3, text=True)
+            if probe.returncode == 0 and probe.stdout.strip().isdigit():
+                display['method'] = 'm1ddc'
+                log.info("DDC/CI available for %s (m1ddc #%d)", display['name'], m1ddc_idx)
+            else:
+                log.info("DDC/CI unavailable for %s (m1ddc #%d, rc=%d)",
+                         display['name'], m1ddc_idx, probe.returncode)
+        except Exception as e:
+            log.info("DDC/CI probe failed for %s: %s", display['name'], e)
+
     def _detect_displays(self):
         max_displays = 16
         display_ids = (ctypes.c_uint32 * max_displays)()
@@ -129,73 +207,114 @@ class MacBrightnessBackend:
             return
 
         external_idx = 1
+        probe_targets = []
         for i in range(display_count.value):
             display_id = display_ids[i]
             is_builtin = bool(self._cg.CGDisplayIsBuiltin(display_id))
             is_mirror = self._cg.CGDisplayMirrorsDisplay(display_id) != 0
             if is_builtin:
                 name = "Built-in Display"
-                method = 'displayservices' if self._ds else None
+                method = 'displayservices' if self._ds is not None else None
                 uuid = None
+                m1ddc_idx = None
             else:
                 m1ddc_idx, info = self._find_m1ddc_match(display_id)
-                name = info.get('name') or f"External Display {external_idx}"
+                product_name = info.get('name')
+                if product_name is None:
+                    name = f"External Display {external_idx}"
+                else:
+                    name = product_name
                 uuid = info.get('uuid')
                 method = None
-                if self._m1ddc and m1ddc_idx is not None:
-                    try:
-                        probe = subprocess.run(
-                            [self._m1ddc, 'get', 'luminance', '-d', str(m1ddc_idx)],
-                            capture_output=True, timeout=3, text=True)
-                        if probe.returncode == 0 and probe.stdout.strip().isdigit():
-                            method = 'm1ddc'
-                            log.info("DDC/CI available for %s (m1ddc #%d)", name, m1ddc_idx)
-                        else:
-                            log.info("DDC/CI unavailable for %s (m1ddc #%d, rc=%d)", name, m1ddc_idx, probe.returncode)
-                    except Exception as e:
-                        log.info("DDC/CI probe failed for %s: %s", name, e)
-                elif self._m1ddc:
+                if self._m1ddc is not None and m1ddc_idx is None:
                     log.info("No m1ddc match found for CG display %d", display_id)
                 external_idx += 1
             if is_mirror:
                 name += " (mirrored)"
-            self._displays.append({
+            display = {
                 'id': display_id,
                 'name': name,
                 'builtin': is_builtin,
                 'method': method,
                 'uuid': uuid,
-                'm1ddc_idx': m1ddc_idx if not is_builtin else None,
-            })
+                'm1ddc_idx': m1ddc_idx,
+            }
+            self._displays.append(display)
+            if not is_builtin and self._m1ddc is not None and m1ddc_idx is not None:
+                probe_targets.append(display)
+
+        # Probe DDC/CI support for all externals concurrently: each probe is a
+        # blocking subprocess with a 3s timeout, so probing serially would
+        # stall app launch by up to 3s per display.
+        if probe_targets:
+            threads = [threading.Thread(target=self._probe_ddc, args=(d,))
+                       for d in probe_targets]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=4)
+
+    def _dedupe_display_names(self):
+        """Ensure display names are unique so name-based lookups are unambiguous.
+
+        Two identical monitors report the same product name; without this,
+        every lookup would resolve to the first one and the second would be
+        uncontrollable. The first occurrence keeps the bare name; subsequent
+        ones get ' 2', ' 3', etc.
+        """
+        seen = {}
+        for d in self._displays:
+            base = d['name']
+            if base in seen:
+                seen[base] += 1
+                d['name'] = f"{base} {seen[base]}"
+            else:
+                seen[base] = 1
+
+    def _find_display(self, display_name):
+        """Return the display dict for a name, or None (never falls back)."""
+        for d in self._displays:
+            if d['name'] == display_name:
+                return d
+        return None
+
+    def _resolve_target(self, display):
+        """Resolve a display argument to a display dict.
+
+        None means "the default (first) display" by contract. A name that does
+        not match any known display is an error: we log and return None rather
+        than silently controlling a different monitor.
+        """
+        if display is None:
+            if self._displays:
+                return self._displays[0]
+            return None
+        target = self._find_display(display)
+        if target is None:
+            log.warning("Unknown display name: %r", display)
+        return target
 
     def list_monitors(self):
         return [d['name'] for d in self._displays]
 
     def has_hardware_control(self, display_name):
-        for d in self._displays:
-            if d['name'] == display_name:
-                return d['method'] is not None
-        return False
+        d = self._find_display(display_name)
+        if d is None:
+            return False
+        return d['method'] is not None
 
     def get_display_bounds(self, display_name):
         """Return (x, y, w, h) in points for the named display, or None."""
-        for d in self._displays:
-            if d['name'] == display_name:
-                r = self._cg.CGDisplayBounds(d['id'])
-                return (int(r.origin.x), int(r.origin.y),
-                        int(r.size.width), int(r.size.height))
-        return None
+        d = self._find_display(display_name)
+        if d is None:
+            return None
+        r = self._cg.CGDisplayBounds(d['id'])
+        return (int(r.origin.x), int(r.origin.y),
+                int(r.size.width), int(r.size.height))
 
     def set_brightness(self, value, display=None):
-        """Set brightness. value: 0-100."""
-        target = None
-        if display:
-            for d in self._displays:
-                if d['name'] == display:
-                    target = d
-                    break
-        if target is None and self._displays:
-            target = self._displays[0]
+        """Set brightness. value: 0-100. m1ddc writes are async and coalesced."""
+        target = self._resolve_target(display)
         if target is None:
             return
 
@@ -205,25 +324,13 @@ class MacBrightnessBackend:
                 target['id'], ctypes.c_float(brightness))
             if kr != 0:
                 log.warning("DisplayServicesSetBrightness returned %d", kr)
-        elif target['method'] == 'm1ddc' and target.get('m1ddc_idx') is not None:
-            try:
-                subprocess.run(
-                    [self._m1ddc, 'set', 'luminance', str(int(value)),
-                     '-d', str(target['m1ddc_idx'])],
-                    capture_output=True, timeout=2)
-            except Exception as e:
-                log.warning("m1ddc brightness set failed: %s", e)
+        elif target['method'] == 'm1ddc' and target['m1ddc_idx'] is not None:
+            if self._ddc_writer is not None:
+                self._ddc_writer.submit(target['m1ddc_idx'], value)
 
     def get_brightness(self, display=None):
         """Get current brightness (0-100), or None on failure."""
-        target = None
-        if display:
-            for d in self._displays:
-                if d['name'] == display:
-                    target = d
-                    break
-        if target is None and self._displays:
-            target = self._displays[0]
+        target = self._resolve_target(display)
         if target is None:
             return None
 
@@ -234,7 +341,11 @@ class MacBrightnessBackend:
             if kr == 0:
                 return int(round(brightness.value * 100))
             return None
-        elif target['method'] == 'm1ddc' and target.get('m1ddc_idx') is not None:
+        elif target['method'] == 'm1ddc' and target['m1ddc_idx'] is not None:
+            # Non-blocking lock attempt: if the writer is mid-set, skip this
+            # poll rather than stalling the UI thread waiting on the DDC bus.
+            if not self._ddc_lock.acquire(blocking=False):
+                return None
             try:
                 result = subprocess.run(
                     [self._m1ddc, 'get', 'luminance', '-d', str(target['m1ddc_idx'])],
@@ -243,7 +354,10 @@ class MacBrightnessBackend:
                     return int(result.stdout.strip())
             except Exception as e:
                 log.warning("m1ddc brightness get failed: %s", e)
+            finally:
+                self._ddc_lock.release()
         return None
 
     def cleanup(self):
-        pass
+        if self._ddc_writer is not None:
+            self._ddc_writer.stop()

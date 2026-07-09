@@ -73,6 +73,22 @@ def _apply_macos_overlay_config(widget, target_geometry):
     class CGRect(ctypes.Structure):
         _fields_ = [('origin', CGPoint), ('size', CGSize)]
 
+    # Convert the target rect (Qt global coords, origin at the primary screen's
+    # top-left, Y growing downward) into a Cocoa global frame (origin at the
+    # primary screen's bottom-left, Y growing upward). The window's bottom edge
+    # in Qt coords is target.y()+height(); in Cocoa that same edge sits at
+    # primary_h - (target.y()+height()). This offset is anchored to the PRIMARY
+    # screen's height for every overlay, regardless of which screen the target is
+    # on, because both coordinate spaces share the primary screen as their origin
+    # reference. Verified correct for: target == primary (y=0 -> cocoa_y=0), a
+    # screen above the primary (negative Qt y -> cocoa_y near/above primary_h),
+    # and a screen beside the primary with a different height. primary_h must be
+    # the primary screen's FULL geometry height (geometry(), not
+    # availableGeometry()) and the target must be Qt global geometry; both hold
+    # here (target comes from QDesktopWidget.screenGeometry, which is global, and
+    # geometry() includes the menu-bar area just as the Cocoa primary frame does).
+    # On HiDPI displays Qt geometry() and NSWindow setFrame both use logical
+    # points, so no devicePixelRatio scaling is needed.
     primary_h = QApplication.primaryScreen().geometry().height()
     cocoa_x = float(target_geometry.x())
     cocoa_y = float(primary_h - target_geometry.y() - target_geometry.height())
