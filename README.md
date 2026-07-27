@@ -134,6 +134,16 @@ If brightness control doesn't work:
 - On macOS, if the hardware brightness slider is grayed out for an external monitor, install `m1ddc` (`brew install m1ddc`) and restart FlexLux. If it's still grayed out, your display likely doesn't support DDC/CI
 - Check that `screen_brightness_control` supports your hardware
 
+### Hardware brightness not working through a KVM switch or USB-C hub
+
+Hardware brightness uses DDC/CI, which travels over the video cable itself. Many KVM switches and budget USB-C hubs/docks pass the monitor's identity (EDID) but drop DDC/CI traffic, so the display still appears by name while brightness commands fail. The symptom is that the hardware side of the slider is unavailable and only the artificial darkening overlay works.
+
+- On macOS, you can confirm this with `m1ddc`: run `m1ddc display list` to find the display index, then `m1ddc get luminance -d <index>`. A "DDC communication failure" error while the monitor is listed means something in the video path is blocking DDC/CI.
+- Connecting the monitor's USB upstream port does not help. It only enables the monitor's built-in USB ports, vendor lighting software, and firmware updates — brightness control does not travel over USB.
+- Fixes: connect the video cable directly to the computer, use a Thunderbolt dock (which tunnels native DisplayPort, including DDC/CI), or use a KVM/hub that explicitly supports DDC/CI passthrough.
+
+Confirmed with an LG 27GN950: DDC/CI fails through both a KVM switch and a GenesysLogic-based USB-C hub, on the same setup where the monitor is otherwise detected correctly.
+
 ## License
 
 This project is licensed under the terms in the License.md file.

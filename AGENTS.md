@@ -26,6 +26,10 @@ The app starts as a **system tray icon** — it does not open a visible window b
 - Set `XDG_RUNTIME_DIR=/tmp/runtime-ubuntu` to suppress a harmless Qt warning.
 - The system tray icon is very small (~3×3px) in some desktop environments; use `xdotool` to find/interact with FlexLux windows programmatically if needed.
 
+### Hardware brightness caveat (DDC/CI)
+
+Hardware brightness requires an unbroken DDC/CI path over the video cable. KVM switches and budget USB-C hubs commonly drop DDC/CI (the monitor still appears by name, but commands fail), leaving the app overlay-only for that display. The monitor's USB upstream port is not a workaround — it carries no brightness control. The primary dev machine deliberately runs a one-cable USB-C hub setup, so external hardware brightness is expected to be unavailable there; do not chase this as a bug.
+
 ### Linting
 
 No project-specific lint config exists. For basic checks:
