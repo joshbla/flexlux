@@ -24,7 +24,13 @@ class PlatformUIConfig:
 
 _MACOS = PlatformUIConfig(
     overlay_flags=Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus,
-    app_window_flags=Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint,
+    # Qt.Popup (not Qt.Tool): Tool windows map to NSPanel with
+    # hidesOnDeactivate, so macOS refuses to show them while the app is
+    # inactive (tray clicks don't activate the app on modern macOS), and Qt's
+    # isVisible() desyncs from reality once Cocoa hides the panel — making
+    # tray clicks appear to do nothing. Popup windows show without app
+    # activation and auto-close on outside clicks with Qt state kept in sync.
+    app_window_flags=Qt.Popup | Qt.FramelessWindowHint,
     slider_handle_width=24,
     slider_handle_radius=12,
     slider_handle_margin=-8,

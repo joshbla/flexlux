@@ -1,4 +1,5 @@
 import logging
+import time
 from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel, QMessageBox, QCheckBox
 from PyQt5.QtGui import QIcon, QCursor
 from PyQt5.QtCore import Qt, QEvent, QTimer, QSettings
@@ -26,6 +27,7 @@ class FlexLuxApp(QWidget):
         self._syncing = False
         self._key_interceptor = None
         self._accessibility_notified = False
+        self._last_hide_time = 0.0
         self._detect_monitors()
         self._create_overlays()
         self.initUI()
@@ -524,13 +526,17 @@ class FlexLuxApp(QWidget):
     def toggle_window(self):
         if self.isVisible():
             self.hide()
-            self._set_poll_speed(fast=False)
-        else:
-            self.show()
-            self.activateWindow()
-            self.raise_()
-            self.updatePosition()
-            self._set_poll_speed(fast=True)
+            return
+        # If the panel was hidden a moment ago by this same tray click (e.g.
+        # the popup auto-closed on mouse-press and the tray Trigger arrives on
+        # mouse-release), the user meant "close" — don't immediately reopen.
+        if time.monotonic() - self._last_hide_time < 0.3:
+            return
+        self.show()
+        self.activateWindow()
+        self.raise_()
+        self.updatePosition()
+        self._set_poll_speed(fast=True)
 
     def on_tray_icon_activated(self, reason):
         if reason == QSystemTrayIcon.Trigger:
@@ -560,11 +566,18 @@ class FlexLuxApp(QWidget):
 
         self.move(x, y)
 
+    def hideEvent(self, event):
+        # Runs for every hide path (tray toggle, popup auto-close on outside
+        # click, focus-loss hide), keeping poll speed and the reopen guard
+        # consistent no matter how the panel was dismissed.
+        self._last_hide_time = time.monotonic()
+        self._set_poll_speed(fast=False)
+        super().hideEvent(event)
+
     def check_focus_and_hide(self):
         if not self.isActiveWindow() and not any(w.hasFocus() for w in self.findChildren(QWidget)):
             self.hide()
             self.hide_timer.stop()
-            self._set_poll_speed(fast=False)
 
     def eventFilter(self, obj, event):
         if not self._ui.use_event_filter:
