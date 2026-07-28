@@ -54,6 +54,8 @@ class FlexLuxApp(QWidget):
             elif interceptor.failure_reason == "permission":
                 self._notify_accessibility_permission()
 
+        QApplication.instance().aboutToQuit.connect(self._shutdown)
+
     def _detect_monitors(self):
         self._backend = None
         try:
@@ -589,7 +591,13 @@ class FlexLuxApp(QWidget):
             self.hide_timer.stop()
         return super().eventFilter(obj, event)
 
-    def closeEvent(self, event):
+    def _shutdown(self):
+        # Connected to QApplication.aboutToQuit, so this runs only on real
+        # exits (tray-menu Quit, logout). It must NOT live in closeEvent: the
+        # macOS panel is a Qt.Popup, and Qt dismisses popups on outside clicks
+        # by closing them, so closeEvent fires on every dismissal — running
+        # teardown there killed the overlays, DDC writer, and key interceptor
+        # mid-session.
         if self._key_interceptor is not None:
             self._key_interceptor.stop()
         if hasattr(self, '_poll_timer'):
@@ -598,4 +606,3 @@ class FlexLuxApp(QWidget):
             self._backend.cleanup()
         for overlay in self.overlays:
             overlay.close()
-        event.accept()
