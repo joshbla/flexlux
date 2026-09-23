@@ -52,7 +52,7 @@ _MACOS = PlatformUIConfig(
 
 _WINDOWS = PlatformUIConfig(
     overlay_flags=Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool,
-    app_window_flags=Qt.Tool | Qt.FramelessWindowHint,
+    app_window_flags=Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint,
     slider_handle_width=50,
     slider_handle_radius=25,
     slider_handle_margin=-20,
