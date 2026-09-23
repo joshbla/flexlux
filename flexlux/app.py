@@ -1,13 +1,13 @@
 import logging
 import time
 from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel, QMessageBox, QCheckBox
-from PyQt5.QtGui import QIcon, QCursor
-from PyQt5.QtCore import Qt, QEvent, QTimer, QSettings
+from PyQt5.QtGui import QIcon, QCursor, QColor, QPainter, QPen
+from PyQt5.QtCore import Qt, QEvent, QTimer, QSettings, QRectF
 
 from flexlux import VERSION
 from flexlux.brightness import get_backend, get_key_interceptor
 from flexlux.overlay import OverlayWindow
-from flexlux.platform_ui import get_ui_config
+from flexlux.platform_ui import get_ui_config, WindowsBrightnessIcon, WindowsBrightnessSlider
 from flexlux.utils import resource_path
 from flexlux import autostart
 
@@ -128,6 +128,11 @@ class FlexLuxApp(QWidget):
         self.settings.sync()
 
     def adjust_window_size(self):
+        if self._ui.compact_panel:
+            available = QApplication.desktop().availableGeometry(QCursor.pos())
+            self.setFixedWidth(min(360, available.width() - 24))
+            self.setFixedHeight(self.layout().sizeHint().height())
+            return
         screen_width = QApplication.desktop().screenGeometry().width()
         new_width = int(0.15 * screen_width)
         single_height = int(new_width / 2.8)
@@ -139,6 +144,9 @@ class FlexLuxApp(QWidget):
         self.resize(new_width, new_height)
 
     def _build_sliders(self, layout):
+        if self._ui.compact_panel:
+            self._build_windows_sliders(layout)
+            return
         handle_w = self._ui.slider_handle_width
         handle_r = self._ui.slider_handle_radius
         handle_m = self._ui.slider_handle_margin
@@ -218,6 +226,44 @@ class FlexLuxApp(QWidget):
             self.link_checkbox.setChecked(self.settings.value("link_monitors", True, type=bool))
             layout.addWidget(self.link_checkbox)
 
+    def _build_windows_sliders(self, layout):
+        self.sliders = []
+        self.link_checkbox = None
+        multi = len(self.monitor_names) > 1
+        for i, name in enumerate(self.monitor_names):
+            if multi:
+                label = QLabel(self)
+                label.setStyleSheet("color: #b8c2cd; font-size: 13px;")
+                label.setText(label.fontMetrics().elidedText(name, Qt.ElideRight, 300))
+                label.setToolTip(name)
+                layout.addWidget(label)
+
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(14)
+            row.addWidget(WindowsBrightnessIcon(True, "Extra screen dimming", self))
+            slider = WindowsBrightnessSlider(self._hw_capable[i], self.min_brightness, self)
+            slider.setAccessibleName(f"Brightness for {name}")
+            slider.valueChanged[int].connect(lambda value, idx=i: self._snap_and_update(idx, value))
+            row.addWidget(slider, 1)
+            bright_hint = "Monitor brightness" if self._hw_capable[i] else "No extra dimming"
+            row.addWidget(WindowsBrightnessIcon(False, bright_hint, self))
+            layout.addLayout(row)
+            self.sliders.append(slider)
+
+        if multi:
+            self.link_checkbox = QCheckBox("Link displays", self)
+            self.link_checkbox.setStyleSheet("""
+                QCheckBox { color: #b8c2cd; font-size: 13px; spacing: 8px; }
+                QCheckBox::indicator {
+                    width: 14px; height: 14px; border: 1px solid #65717f; border-radius: 4px;
+                }
+                QCheckBox::indicator:checked { background: #a6bdca; border-color: #a6bdca; }
+                QCheckBox::indicator:focus { border-color: #f1f5f9; }
+            """)
+            self.link_checkbox.setChecked(self.settings.value("link_monitors", True, type=bool))
+            layout.addWidget(self.link_checkbox, 0, Qt.AlignHCenter)
+
     def _clear_layout(self, layout):
         while layout.count():
             item = layout.takeAt(0)
@@ -255,12 +301,26 @@ class FlexLuxApp(QWidget):
 
     def initUI(self):
         layout = QVBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(2)
+        if self._ui.compact_panel:
+            layout.setContentsMargins(22, 22, 22, 22)
+            layout.setSpacing(8)
+        else:
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(2)
 
         self._build_sliders(layout)
 
-        self.setStyleSheet("background-color: #111111;")
+        if self._ui.compact_panel:
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.setStyleSheet("""
+                QWidget { background: transparent; font-family: 'Segoe UI'; }
+                QToolTip {
+                    color: #edf2f7; background: #262c35; border: 1px solid #49525e;
+                    padding: 8px 12px; font-size: 13px;
+                }
+            """)
+        else:
+            self.setStyleSheet("background-color: #111111;")
         self.setLayout(layout)
 
         self.adjust_window_size()
@@ -298,6 +358,16 @@ class FlexLuxApp(QWidget):
 
         if self._ui.use_event_filter:
             QApplication.instance().installEventFilter(self)
+
+    def paintEvent(self, event):
+        if not self._ui.compact_panel:
+            super().paintEvent(event)
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#3c444f"), 1))
+        painter.setBrush(QColor("#1b2028"))
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 16, 16)
 
     def _set_hardware_brightness(self, value, display):
         """Set hardware brightness (0-100) using the platform-appropriate backend."""
@@ -551,6 +621,15 @@ class FlexLuxApp(QWidget):
 
     def updatePosition(self):
         cursor_pos = QCursor.pos()
+        if self._ui.compact_panel:
+            # Work-area coordinates also handle non-primary screens and taskbars
+            # placed on any edge, without covering the taskbar itself.
+            available = QApplication.desktop().availableGeometry(cursor_pos)
+            x = cursor_pos.x() - self.width() // 2
+            x = max(available.left() + 12, min(x, available.right() - self.width() - 11))
+            y = available.bottom() - self.height() - 11
+            self.move(x, max(available.top() + 12, y))
+            return
         screen_geometry = QApplication.desktop().screenGeometry(cursor_pos)
 
         window_width = self.width()
