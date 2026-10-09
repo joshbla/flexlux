@@ -2,7 +2,9 @@
 
 PyQt5 desktop app for adjusting monitor brightness via a system tray slider. The code lives in the `flexlux/` package. See `README.md` for full usage and build instructions.
 
-**Platform note:** Primarily developed for Windows. macOS and Linux (X11) also supported but less tested.
+**Platform note:** Windows and macOS are equally primary; both are used daily. Linux (X11) is supported but less tested.
+
+Outstanding work is tracked in the root `TODO.md`.
 
 ## Cursor Cloud specific instructions
 

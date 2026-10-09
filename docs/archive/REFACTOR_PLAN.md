@@ -1,5 +1,7 @@
 # FlexLux Refactoring Plan
 
+**Status: completed (archived).** All six phases shipped in v1.4.0 through v1.4.5; the package layout below is the one in use. This plan is historical and not a current instruction. Later changes to the modules it lists (for example the macOS key interceptor and Windows panel) are not reflected here.
+
 Split the single-file application (`flexlux.py`, ~900 lines) into a proper Python package with platform-specific code isolated behind clean interfaces.
 
 ## Motivation
