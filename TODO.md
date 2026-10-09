@@ -2,6 +2,9 @@
 
 ## Verification
 
+- Verify warmth on real Windows hardware: the slider tints every display, the default gamma limit triggers the "Allow Stronger Warmth" offer, the elevated registry change works after sign-in, and quitting restores neutral color. Untested; written on macOS.
+- Verify warmth on Linux X11 (XRandR gamma): tint applies per CRTC, quitting restores, and the panel hides warmth under Wayland. Untested.
+
 - Verify background brightness I/O on real Windows hardware: dragging the slider and leaving the panel open should stay smooth, including with a monitor whose DDC/CI is blocked (KVM/hub). Simulated slow-monitor checks passed on macOS; not yet run on Windows or Linux.
 
 ## Bugs

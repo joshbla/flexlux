@@ -10,6 +10,7 @@ Compatible with Windows, Linux, and macOS.
 - 🎯 Simple slider interface accessible from system tray
 - 🖥️ Cross-platform support (Windows, Linux, macOS)
 - 🌑 Artificial darkening for ultra-low brightness
+- Screen warmth (blue-light reduction) from neutral down to a deep 1200K
 - ⚡ Lightweight and minimal resource usage
 
 ## How to Run FlexLux
@@ -114,7 +115,16 @@ The executable will be created in the `dist/` directory.
    - **Center** (100): Minimum hardware brightness
    - **Left** (0-100): Apply artificial darkening overlay
 
-On macOS, displays that are mirroring each other are darkened through each display's own color output instead of the shared overlay, so each one dims independently and can be taken all the way to black. Apps that also rewrite display color output, such as f.lux, conflict with this and cause flicker on mirrored displays.
+On macOS, displays that are mirroring each other are darkened through each display's own color output instead of the shared overlay, so each one dims independently and can be taken all the way to black.
+
+### Warmth
+
+The **Warmth** checkbox and slider below the brightness controls tint every display toward orange, from neutral (6500K) at the left to 1200K at the right; about a third of the way along matches macOS Night Shift's warmest setting. Moving the slider turns warmth on; the checkbox turns it off without losing the level. Warmth works on displays that Night Shift skips, such as TVs.
+
+Warmth and mirrored-display dimming write each display's gamma ramp. Other apps that also write it, such as f.lux, fight with FlexLux and cause flicker; quit them while using these features. FlexLux puts the original ramps back when it quits.
+
+- **Windows**: by default Windows refuses strong gamma changes, so very warm settings are weakened. When that happens FlexLux offers **Allow Stronger Warmth...** in the tray menu, which asks for administrator approval to set the `GdiIcmGammaRange` registry value; sign out and back in for it to take effect. Gamma changes do not apply to displays running in HDR mode.
+- **Linux**: requires X11 (XRandR). Warmth is hidden under Wayland, where X11 gamma changes never reach the screen.
 
 Right-click the tray icon for additional options.
 

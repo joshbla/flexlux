@@ -1,11 +1,12 @@
 import logging
 import time
-from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel, QMessageBox, QCheckBox
+from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel, QMessageBox, QCheckBox, QToolTip
 from PyQt5.QtGui import QIcon, QCursor, QColor, QPainter, QPen
 from PyQt5.QtCore import Qt, QEvent, QTimer, QSettings, QRectF
 
 from flexlux import VERSION
 from flexlux.brightness import get_backend, get_key_interceptor
+from flexlux.gamma import get_gamma_controller, warmth_rgb, warmth_kelvin
 from flexlux.overlay import OverlayWindow
 from flexlux.platform_ui import get_ui_config, WindowsBrightnessIcon, WindowsBrightnessSlider
 from flexlux.utils import resource_path
@@ -28,6 +29,8 @@ class FlexLuxApp(QWidget):
         self._key_interceptor = None
         self._accessibility_notified = False
         self._last_hide_time = 0.0
+        self._gamma_unlock_offered = False
+        self._gamma = get_gamma_controller()
         self._detect_monitors()
         self._create_overlays()
         self.initUI()
@@ -47,7 +50,7 @@ class FlexLuxApp(QWidget):
         self._gamma_timer = QTimer()
         self._gamma_timer.setInterval(self._GAMMA_REAPPLY_INTERVAL_MS)
         self._gamma_timer.timeout.connect(self._reapply_gamma)
-        if any(self._gamma_dimmed):
+        if self._gamma is not None:
             self._gamma_timer.start()
 
         interceptor = get_key_interceptor()
@@ -77,15 +80,26 @@ class FlexLuxApp(QWidget):
 
         if self._backend and self.monitor_names:
             self._hw_capable = [self._backend.has_hardware_control(n) for n in self.monitor_names]
-            self._gamma_dimmed = [self._backend.uses_gamma_dimming(n) for n in self.monitor_names]
+            self._gamma_keys = [self._gamma_key_for(n) for n in self.monitor_names]
         else:
             self._hw_capable = []
-            self._gamma_dimmed = []
+            self._gamma_keys = []
 
         if not self.monitor_names:
             self.monitor_names = ["Display"]
             self._hw_capable = [False]
-            self._gamma_dimmed = [False]
+            self._gamma_keys = [None]
+
+    def _gamma_key_for(self, name):
+        """Gamma controller key for a monitor dimmed through gamma, else None."""
+        key = self._backend.gamma_dimming_key(name)
+        if key is None:
+            return None
+        if self._gamma is None or key not in self._gamma.keys():
+            log.warning("%s needs gamma dimming but gamma control is unavailable; "
+                        "it will share the overlay", name)
+            return None
+        return key
 
     def _create_overlays(self):
         desktop = QApplication.desktop()
@@ -96,7 +110,7 @@ class FlexLuxApp(QWidget):
             screen_to_overlay = {}
             self.overlays = []
             for mon_idx, name in enumerate(self.monitor_names):
-                if self._gamma_dimmed[mon_idx]:
+                if self._gamma_keys[mon_idx] is not None:
                     self._overlay_for_monitor.append(None)
                     continue
                 qt_screen = mon_idx
@@ -115,7 +129,7 @@ class FlexLuxApp(QWidget):
                 self._overlay_for_monitor.append(screen_to_overlay[qt_screen])
         else:
             self.overlays = [OverlayWindow()]
-            self._overlay_for_monitor = [None if g else 0 for g in self._gamma_dimmed]
+            self._overlay_for_monitor = [0 if k is None else None for k in self._gamma_keys]
 
     def _restore_settings(self):
         for i, name in enumerate(self.monitor_names):
@@ -132,12 +146,19 @@ class FlexLuxApp(QWidget):
             upper = 200 if self._hw_capable[i] else 100
             value = max(0, min(upper, value))
             self.sliders[i].setValue(value)
+        if self.warmth_slider is not None:
+            self._set_warmth_controls(
+                self.settings.value("warmth/enabled", False, type=bool),
+                self.settings.value("warmth/level", self._WARMTH_DEFAULT_LEVEL, type=int))
 
     def _save_settings(self):
         for i, name in enumerate(self.monitor_names):
             self.settings.setValue(f"brightness/{name}", self.sliders[i].value())
         if self.link_checkbox:
             self.settings.setValue("link_monitors", self.link_checkbox.isChecked())
+        if self.warmth_slider is not None:
+            self.settings.setValue("warmth/enabled", self.warmth_checkbox.isChecked())
+            self.settings.setValue("warmth/level", self.warmth_slider.value())
         self.settings.sync()
 
     def adjust_window_size(self):
@@ -154,6 +175,8 @@ class FlexLuxApp(QWidget):
             new_height = single_height * n + 16 * (n - 1)
         else:
             new_height = single_height
+        if self.warmth_slider is not None:
+            new_height += self.warmth_checkbox.sizeHint().height() + self._ui.slider_max_height
         self.resize(new_width, new_height)
 
     def _build_sliders(self, layout):
@@ -239,6 +262,31 @@ class FlexLuxApp(QWidget):
             self.link_checkbox.setChecked(self.settings.value("link_monitors", True, type=bool))
             layout.addWidget(self.link_checkbox)
 
+        self.warmth_checkbox = None
+        self.warmth_slider = None
+        if self._gamma is not None:
+            self.warmth_checkbox = QCheckBox("Warmth")
+            self.warmth_checkbox.setStyleSheet("color: #888888; font-size: 10px; margin-top: 4px;")
+            self.warmth_slider = QSlider(Qt.Horizontal, self)
+            self.warmth_slider.setStyleSheet(f"""
+            .QSlider {{
+                max-height: {max_h}px;
+            }}
+            QSlider::groove:horizontal {{
+                height: {groove_h}px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 darkgray, stop:1 #d9822b);
+            }}
+            QSlider::handle:horizontal {{
+                width: {handle_w}px;
+                background-color: white;
+                border-radius: {handle_r}px;
+                margin: {handle_m}px 0;
+            }}
+            """)
+            self._wire_warmth_controls()
+            layout.addWidget(self.warmth_checkbox)
+            layout.addWidget(self.warmth_slider)
+
     def _build_windows_sliders(self, layout):
         self.sliders = []
         self.link_checkbox = None
@@ -277,6 +325,44 @@ class FlexLuxApp(QWidget):
             self.link_checkbox.setChecked(self.settings.value("link_monitors", True, type=bool))
             layout.addWidget(self.link_checkbox, 0, Qt.AlignHCenter)
 
+        self.warmth_checkbox = None
+        self.warmth_slider = None
+        if self._gamma is not None:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(14)
+            self.warmth_checkbox = QCheckBox("Warmth", self)
+            self.warmth_checkbox.setStyleSheet("""
+                QCheckBox { color: #b8c2cd; font-size: 13px; spacing: 8px; }
+                QCheckBox::indicator {
+                    width: 14px; height: 14px; border: 1px solid #65717f; border-radius: 4px;
+                }
+                QCheckBox::indicator:checked { background: #d9a066; border-color: #d9a066; }
+                QCheckBox::indicator:focus { border-color: #f1f5f9; }
+            """)
+            self.warmth_slider = QSlider(Qt.Horizontal, self)
+            self.warmth_slider.setFixedHeight(44)
+            self.warmth_slider.setCursor(Qt.PointingHandCursor)
+            self.warmth_slider.setAccessibleName("Screen warmth")
+            self.warmth_slider.setStyleSheet("""
+                QSlider { background: transparent; padding: 0 5px; }
+                QSlider::groove:horizontal {
+                    height: 4px; background: #3b424c; border-radius: 2px;
+                }
+                QSlider::sub-page:horizontal {
+                    background: #d9a066; border-radius: 2px;
+                }
+                QSlider::handle:horizontal {
+                    width: 18px; margin: -7px 0;
+                    background: #f1f5f9; border-radius: 9px;
+                }
+                QSlider::handle:horizontal:pressed { background: #f3d2ad; }
+            """)
+            self._wire_warmth_controls()
+            row.addWidget(self.warmth_checkbox)
+            row.addWidget(self.warmth_slider, 1)
+            layout.addLayout(row)
+
     def _clear_layout(self, layout):
         while layout.count():
             item = layout.takeAt(0)
@@ -296,6 +382,11 @@ class FlexLuxApp(QWidget):
         # cannot land after the new backend's.
         if self._backend:
             self._backend.cleanup()
+        # The display set changed: put back the old displays' ramps and
+        # capture fresh ones for the new set.
+        if self._gamma is not None:
+            self._gamma.restore()
+        self._gamma = get_gamma_controller()
         self._detect_monitors()
         self._create_overlays()
 
@@ -310,7 +401,7 @@ class FlexLuxApp(QWidget):
         if any(self._hw_capable):
             self._poll_timer.start()
         self._gamma_timer.stop()
-        if any(self._gamma_dimmed):
+        if self._gamma is not None:
             self._gamma_timer.start()
 
         # Reconcile key interception against the new monitor set. We do not
@@ -363,11 +454,15 @@ class FlexLuxApp(QWidget):
         self.about_action.triggered.connect(self._show_about)
         self.reset_action = QAction("Reset Settings", self)
         self.reset_action.triggered.connect(self._reset_settings)
+        self.gamma_unlock_action = QAction("Allow Stronger Warmth...", self)
+        self.gamma_unlock_action.triggered.connect(self._unlock_gamma_range)
+        self.gamma_unlock_action.setVisible(False)
         self.quit_action = QAction("Quit", self)
         self.quit_action.triggered.connect(QApplication.instance().quit)
         self.tray_menu.addAction(self.autostart_action)
         self.tray_menu.addAction(self.about_action)
         self.tray_menu.addAction(self.reset_action)
+        self.tray_menu.addAction(self.gamma_unlock_action)
         self.tray_menu.addSeparator()
         self.tray_menu.addAction(self.quit_action)
         if not self._ui.use_manual_tray_menu:
@@ -526,6 +621,7 @@ class FlexLuxApp(QWidget):
     _KEY_STEP = 6
     _KEY_MIN_VALUE = 0
     _GAMMA_REAPPLY_INTERVAL_MS = 2000
+    _WARMTH_DEFAULT_LEVEL = 40
 
     def _snap_and_update(self, monitor_idx, value):
         if not self._hw_capable[monitor_idx] and value > 100:
@@ -572,16 +668,77 @@ class FlexLuxApp(QWidget):
         return value / 100
 
     def _apply_artificial_dimming(self, monitor_idx):
-        if self._gamma_dimmed[monitor_idx]:
-            self._backend.set_gamma_dimming(
-                self._gamma_level_for_value(self.sliders[monitor_idx].value()),
-                self.monitor_names[monitor_idx])
+        key = self._gamma_keys[monitor_idx]
+        if key is not None:
+            self._gamma.set_dimming(key, self._gamma_level_for_value(self.sliders[monitor_idx].value()))
         else:
             self._recalc_overlay(self._overlay_for_monitor[monitor_idx])
 
     def _reapply_gamma(self):
-        if self._backend:
-            self._backend.reapply_gamma_dimming()
+        self._gamma.reapply()
+
+    def _wire_warmth_controls(self):
+        self.warmth_slider.setRange(0, 100)
+        self.warmth_slider.setValue(self._WARMTH_DEFAULT_LEVEL)
+        self._update_warmth_tooltip()
+        self.warmth_checkbox.toggled.connect(self._on_warmth_toggled)
+        self.warmth_slider.valueChanged[int].connect(self._on_warmth_level_changed)
+
+    def _set_warmth_controls(self, enabled, level):
+        """Set warmth widgets without their change handlers, then apply once."""
+        self.warmth_checkbox.blockSignals(True)
+        self.warmth_slider.blockSignals(True)
+        self.warmth_checkbox.setChecked(enabled)
+        self.warmth_slider.setValue(max(0, min(100, level)))
+        self.warmth_checkbox.blockSignals(False)
+        self.warmth_slider.blockSignals(False)
+        self._update_warmth_tooltip()
+        self._apply_warmth()
+
+    def _update_warmth_tooltip(self):
+        kelvin = warmth_kelvin(self.warmth_slider.value() / 100)
+        self.warmth_slider.setToolTip(f"Warmth  ·  {kelvin}K")
+
+    def _on_warmth_toggled(self, _checked):
+        self._apply_warmth()
+        self._save_timer.start()
+
+    def _on_warmth_level_changed(self, _value):
+        self._update_warmth_tooltip()
+        if self.warmth_slider.isSliderDown():
+            QToolTip.showText(QCursor.pos(), self.warmth_slider.toolTip(), self.warmth_slider)
+        # Moving the slider means the user wants warmth on.
+        if not self.warmth_checkbox.isChecked():
+            self.warmth_checkbox.setChecked(True)
+            return
+        self._apply_warmth()
+        self._save_timer.start()
+
+    def _apply_warmth(self):
+        strength = self.warmth_slider.value() / 100 if self.warmth_checkbox.isChecked() else 0.0
+        if not self._gamma.set_warmth(warmth_rgb(strength)):
+            self._offer_gamma_unlock()
+
+    def _offer_gamma_unlock(self):
+        """Once per run, point the user at lifting the OS gamma limit."""
+        if self._gamma_unlock_offered or not self._gamma.can_unlock_full_range():
+            return
+        self._gamma_unlock_offered = True
+        self.gamma_unlock_action.setVisible(True)
+        self.tray_icon.showMessage(
+            "FlexLux: Warmth limited by Windows",
+            "Windows limits how warm the screen can get. Choose \"Allow Stronger Warmth\" "
+            "from the tray menu to lift the limit (needs administrator approval).",
+            QSystemTrayIcon.Warning, 8000)
+
+    def _unlock_gamma_range(self):
+        if self._gamma is None or not self._gamma.unlock_full_range():
+            return
+        self.gamma_unlock_action.setVisible(False)
+        self.tray_icon.showMessage(
+            "FlexLux: Stronger warmth allowed",
+            "Sign out of Windows and back in for the full warmth range to take effect.",
+            QSystemTrayIcon.Information, 8000)
 
     def _on_slider_changed(self, monitor_idx, value):
         self._save_timer.start()
@@ -637,6 +794,8 @@ class FlexLuxApp(QWidget):
             slider.setValue(100)
         if self.link_checkbox:
             self.link_checkbox.setChecked(True)
+        if self.warmth_slider is not None:
+            self._set_warmth_controls(False, self._WARMTH_DEFAULT_LEVEL)
         self.adjust_window_size()
 
     def toggle_window(self):
@@ -727,6 +886,8 @@ class FlexLuxApp(QWidget):
             self._poll_timer.stop()
         if hasattr(self, '_gamma_timer'):
             self._gamma_timer.stop()
+        if self._gamma is not None:
+            self._gamma.restore()
         if hasattr(self, '_backend') and self._backend:
             self._backend.cleanup()
         for overlay in self.overlays:
