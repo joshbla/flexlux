@@ -44,6 +44,11 @@ class FlexLuxApp(QWidget):
         self._poll_timer.timeout.connect(self._poll_brightness)
         if any(self._hw_capable):
             self._poll_timer.start()
+        self._gamma_timer = QTimer()
+        self._gamma_timer.setInterval(self._GAMMA_REAPPLY_INTERVAL_MS)
+        self._gamma_timer.timeout.connect(self._reapply_gamma)
+        if any(self._gamma_dimmed):
+            self._gamma_timer.start()
 
         interceptor = get_key_interceptor()
         if interceptor is not None:
@@ -72,12 +77,15 @@ class FlexLuxApp(QWidget):
 
         if self._backend and self.monitor_names:
             self._hw_capable = [self._backend.has_hardware_control(n) for n in self.monitor_names]
+            self._gamma_dimmed = [self._backend.uses_gamma_dimming(n) for n in self.monitor_names]
         else:
             self._hw_capable = []
+            self._gamma_dimmed = []
 
         if not self.monitor_names:
             self.monitor_names = ["Display"]
             self._hw_capable = [False]
+            self._gamma_dimmed = [False]
 
     def _create_overlays(self):
         desktop = QApplication.desktop()
@@ -88,6 +96,9 @@ class FlexLuxApp(QWidget):
             screen_to_overlay = {}
             self.overlays = []
             for mon_idx, name in enumerate(self.monitor_names):
+                if self._gamma_dimmed[mon_idx]:
+                    self._overlay_for_monitor.append(None)
+                    continue
                 qt_screen = mon_idx
                 if self._backend:
                     bounds = self._backend.get_display_bounds(name)
@@ -104,7 +115,7 @@ class FlexLuxApp(QWidget):
                 self._overlay_for_monitor.append(screen_to_overlay[qt_screen])
         else:
             self.overlays = [OverlayWindow()]
-            self._overlay_for_monitor = [0] * len(self.monitor_names)
+            self._overlay_for_monitor = [None if g else 0 for g in self._gamma_dimmed]
 
     def _restore_settings(self):
         for i, name in enumerate(self.monitor_names):
@@ -298,6 +309,9 @@ class FlexLuxApp(QWidget):
         self._poll_timer.stop()
         if any(self._hw_capable):
             self._poll_timer.start()
+        self._gamma_timer.stop()
+        if any(self._gamma_dimmed):
+            self._gamma_timer.start()
 
         # Reconcile key interception against the new monitor set. We do not
         # construct the interceptor here if it was never created at startup —
@@ -437,7 +451,7 @@ class FlexLuxApp(QWidget):
             self.sliders[i].setValue(new_slider)
             self.sliders[i].blockSignals(False)
 
-            self._recalc_overlay(self._overlay_for_monitor[i])
+            self._apply_artificial_dimming(i)
 
             self._save_timer.start()
 
@@ -511,6 +525,7 @@ class FlexLuxApp(QWidget):
     _POLL_THRESHOLD = 3
     _KEY_STEP = 6
     _KEY_MIN_VALUE = 0
+    _GAMMA_REAPPLY_INTERVAL_MS = 2000
 
     def _snap_and_update(self, monitor_idx, value):
         if not self._hw_capable[monitor_idx] and value > 100:
@@ -545,6 +560,29 @@ class FlexLuxApp(QWidget):
                 max_alpha = max(max_alpha, self._overlay_alpha_for_value(self.sliders[i].value()))
         self.overlays[overlay_idx].setTransparency(max_alpha)
 
+    @staticmethod
+    def _gamma_level_for_value(value):
+        """Compute gamma output level (0.0-1.0) for a slider value.
+
+        Unlike the overlay, gamma reaches full black at 0: a gamma-dimmed
+        display is mirrored, so the panel stays visible on the other display.
+        """
+        if value >= 100:
+            return 1.0
+        return value / 100
+
+    def _apply_artificial_dimming(self, monitor_idx):
+        if self._gamma_dimmed[monitor_idx]:
+            self._backend.set_gamma_dimming(
+                self._gamma_level_for_value(self.sliders[monitor_idx].value()),
+                self.monitor_names[monitor_idx])
+        else:
+            self._recalc_overlay(self._overlay_for_monitor[monitor_idx])
+
+    def _reapply_gamma(self):
+        if self._backend:
+            self._backend.reapply_gamma_dimming()
+
     def _on_slider_changed(self, monitor_idx, value):
         self._save_timer.start()
         if hasattr(self, '_poll_timer'):
@@ -563,7 +601,7 @@ class FlexLuxApp(QWidget):
             else:
                 if hw:
                     self._set_hardware_brightness(self.min_brightness, monitor_name)
-            self._recalc_overlay(self._overlay_for_monitor[monitor_idx])
+            self._apply_artificial_dimming(monitor_idx)
             self._update_key_intercept_state()
         except Exception as e:
             log.warning("Could not change brightness for %s: %s", monitor_name, e)
@@ -687,6 +725,8 @@ class FlexLuxApp(QWidget):
             self._key_interceptor.stop()
         if hasattr(self, '_poll_timer'):
             self._poll_timer.stop()
+        if hasattr(self, '_gamma_timer'):
+            self._gamma_timer.stop()
         if hasattr(self, '_backend') and self._backend:
             self._backend.cleanup()
         for overlay in self.overlays:

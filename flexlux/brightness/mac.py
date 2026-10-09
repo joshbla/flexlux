@@ -94,6 +94,14 @@ class MacBrightnessBackend:
         self._cg.CGDisplayModelNumber.restype = ctypes.c_uint32
         self._cg.CGDisplaySerialNumber.argtypes = [ctypes.c_uint32]
         self._cg.CGDisplaySerialNumber.restype = ctypes.c_uint32
+        _table = ctypes.POINTER(ctypes.c_float)
+        self._cg.CGGetDisplayTransferByTable.argtypes = [
+            ctypes.c_uint32, ctypes.c_uint32, _table, _table, _table,
+            ctypes.POINTER(ctypes.c_uint32)]
+        self._cg.CGGetDisplayTransferByTable.restype = ctypes.c_int32
+        self._cg.CGSetDisplayTransferByTable.argtypes = [
+            ctypes.c_uint32, ctypes.c_uint32, _table, _table, _table]
+        self._cg.CGSetDisplayTransferByTable.restype = ctypes.c_int32
 
         # Configure DisplayServices on a local first and publish to self._ds
         # only once every symbol is typed, so a partially-configured library
@@ -206,6 +214,16 @@ class MacBrightnessBackend:
         if result != 0:
             return
 
+        # Displays in a mirror set show the same framebuffer, so one overlay
+        # window darkens all of them. Each display still has its own gamma
+        # table, which lets us dim them independently.
+        mirrored_ids = set()
+        for i in range(display_count.value):
+            source = self._cg.CGDisplayMirrorsDisplay(display_ids[i])
+            if source != 0:
+                mirrored_ids.add(display_ids[i])
+                mirrored_ids.add(source)
+
         external_idx = 1
         probe_targets = []
         for i in range(display_count.value):
@@ -238,7 +256,14 @@ class MacBrightnessBackend:
                 'method': method,
                 'uuid': uuid,
                 'm1ddc_idx': m1ddc_idx,
+                'gamma_table': None,
+                'gamma_level': 1.0,
             }
+            if display_id in mirrored_ids:
+                display['gamma_table'] = self._read_gamma_table(display_id)
+                if display['gamma_table'] is None:
+                    log.warning("Could not read gamma table for %s; it will share "
+                                "the mirror's overlay dimming", name)
             self._displays.append(display)
             if not is_builtin and self._m1ddc is not None and m1ddc_idx is not None:
                 probe_targets.append(display)
@@ -293,6 +318,68 @@ class MacBrightnessBackend:
         if target is None:
             log.warning("Unknown display name: %r", display)
         return target
+
+    _GAMMA_TABLE_CAPACITY = 1024
+
+    def _read_gamma_table(self, display_id):
+        """Return the display's current (r, g, b) transfer tables, or None."""
+        cap = self._GAMMA_TABLE_CAPACITY
+        r, g, b = (ctypes.c_float * cap)(), (ctypes.c_float * cap)(), (ctypes.c_float * cap)()
+        count = ctypes.c_uint32()
+        err = self._cg.CGGetDisplayTransferByTable(
+            display_id, cap, r, g, b, ctypes.byref(count))
+        if err != 0 or count.value == 0:
+            log.warning("CGGetDisplayTransferByTable(%d) failed: %d", display_id, err)
+            return None
+        n = count.value
+        return list(r[:n]), list(g[:n]), list(b[:n])
+
+    def _write_gamma(self, display):
+        """Write the display's original gamma table scaled by its gamma_level."""
+        level = display['gamma_level']
+        tables = [(ctypes.c_float * len(t))(*(v * level for v in t))
+                  for t in display['gamma_table']]
+        err = self._cg.CGSetDisplayTransferByTable(
+            display['id'], len(display['gamma_table'][0]), *tables)
+        if err != 0:
+            log.warning("CGSetDisplayTransferByTable failed for %s: %d", display['name'], err)
+
+    def uses_gamma_dimming(self, display_name):
+        """True when artificial dimming for this display must use its gamma table.
+
+        Only displays in a mirror set use gamma: an overlay window would be
+        drawn on every display in the set.
+        """
+        d = self._find_display(display_name)
+        if d is None:
+            return False
+        return d['gamma_table'] is not None
+
+    def set_gamma_dimming(self, level, display):
+        """Scale the display's output by level (0.0 = black, 1.0 = unchanged)."""
+        target = self._find_display(display)
+        if target is None or target['gamma_table'] is None:
+            log.warning("Gamma dimming unavailable for %r", display)
+            return
+        level = max(0.0, min(1.0, level))
+        if level == target['gamma_level']:
+            return
+        target['gamma_level'] = level
+        self._write_gamma(target)
+
+    def reapply_gamma_dimming(self):
+        """Rewrite gamma for dimmed displays whose table macOS has reset
+        (display reconfiguration, wake from sleep, ColorSync changes)."""
+        for d in self._displays:
+            if d['gamma_table'] is None or d['gamma_level'] == 1.0:
+                continue
+            current = self._read_gamma_table(d['id'])
+            if current is None:
+                continue
+            expected_top = d['gamma_table'][0][-1] * d['gamma_level']
+            if abs(current[0][-1] - expected_top) > 0.01:
+                log.info("Gamma for %s was reset; reapplying", d['name'])
+                self._write_gamma(d)
 
     def list_monitors(self):
         return [d['name'] for d in self._displays]
@@ -359,5 +446,9 @@ class MacBrightnessBackend:
         return None
 
     def cleanup(self):
+        for d in self._displays:
+            if d['gamma_table'] is not None and d['gamma_level'] != 1.0:
+                d['gamma_level'] = 1.0
+                self._write_gamma(d)
         if self._ddc_writer is not None:
             self._ddc_writer.stop()

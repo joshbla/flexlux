@@ -114,6 +114,8 @@ The executable will be created in the `dist/` directory.
    - **Center** (100): Minimum hardware brightness
    - **Left** (0-100): Apply artificial darkening overlay
 
+On macOS, displays that are mirroring each other are darkened through each display's own color output instead of the shared overlay, so each one dims independently and can be taken all the way to black. Apps that also rewrite display color output, such as f.lux, conflict with this and cause flicker on mirrored displays.
+
 Right-click the tray icon for additional options.
 
 ## Platform Notes

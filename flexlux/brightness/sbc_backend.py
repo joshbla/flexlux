@@ -184,6 +184,16 @@ class SbcBrightnessBackend:
         # positional monitor->screen mapping.
         return None
 
+    def uses_gamma_dimming(self, display_name) -> bool:
+        # Artificial dimming is always done with overlays on Windows/Linux.
+        return False
+
+    def set_gamma_dimming(self, level, display) -> None:
+        raise NotImplementedError("gamma dimming is macOS-only")
+
+    def reapply_gamma_dimming(self) -> None:
+        pass
+
     def set_brightness(self, value, display=None) -> None:
         """Queue a brightness write. Writes are async and coalesced."""
         display_obj = self._displays.get(display) if isinstance(display, str) else None
