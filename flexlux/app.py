@@ -63,6 +63,8 @@ class FlexLuxApp(QWidget):
             self.monitor_names = self._backend.list_monitors()
         except Exception as e:
             log.warning("Brightness backend init failed: %s", e)
+            if self._backend:
+                self._backend.cleanup()
             self._backend = None
             self.monitor_names = []
 
@@ -279,6 +281,10 @@ class FlexLuxApp(QWidget):
         for overlay in self.overlays:
             overlay.close()
 
+        # Flush and stop the old backend's writer thread so its queued writes
+        # cannot land after the new backend's.
+        if self._backend:
+            self._backend.cleanup()
         self._detect_monitors()
         self._create_overlays()
 

@@ -1,4 +1,6 @@
 import logging
+import threading
+from collections import Counter
 from typing import Optional
 
 import screen_brightness_control as sbc
@@ -14,6 +16,83 @@ _INFO_KEYS = (
     'index', 'method', 'edid', 'manufacturer', 'manufacturer_id',
     'model', 'name', 'serial', 'uid', '_methods',
 )
+
+
+class _BrightnessWorker:
+    """Runs sbc brightness reads and writes on one background thread.
+
+    On Windows every VCP call re-enumerates the monitors and retries up to 50
+    times, which takes seconds when DDC/CI is blocked (KVM switches, hubs).
+    Calling sbc on the UI thread therefore froze the panel during slider drags
+    and polls. Writes keep only the LATEST pending value per display; reads
+    refresh a cache that get_brightness() serves without blocking. A single
+    thread serializes all access to each display's DDC/CI bus.
+    """
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._writes = {}       # name -> (sbc.Display, value)
+        self._reads = {}        # name -> sbc.Display
+        self._readings = {}     # name -> last brightness read after the latest write
+        self._write_gen = Counter()
+        self._stop_requested = False
+        self._thread = threading.Thread(
+            target=self._run, name="flexlux-sbc-worker", daemon=True)
+        self._thread.start()
+
+    def submit_write(self, name, display, value):
+        with self._cond:
+            self._writes[name] = (display, value)
+            self._write_gen[name] += 1
+            # Any cached reading predates this write and would make the
+            # poller think the brightness was changed externally.
+            self._readings.pop(name, None)
+            self._cond.notify()
+
+    def latest_reading(self, name, display):
+        """Return the most recent reading (or None) and queue a fresh read."""
+        with self._cond:
+            self._reads[name] = display
+            self._cond.notify()
+            return self._readings.get(name)
+
+    def stop(self):
+        """Flush remaining writes, drop pending reads, then stop the thread."""
+        with self._cond:
+            self._stop_requested = True
+            self._reads.clear()
+            self._cond.notify()
+        self._thread.join(timeout=5)
+
+    def _run(self):
+        while True:
+            with self._cond:
+                while not self._writes and not self._reads and not self._stop_requested:
+                    self._cond.wait()
+                if self._writes:
+                    name, (display, value) = self._writes.popitem()
+                    is_write = True
+                elif self._stop_requested:
+                    return
+                else:
+                    name, display = self._reads.popitem()
+                    gen = self._write_gen[name]
+                    is_write = False
+            if is_write:
+                try:
+                    display.set_brightness(value=value)
+                except Exception as e:
+                    log.warning("sbc brightness set failed for %s: %s", name, e)
+                continue
+            try:
+                value = display.get_brightness()
+            except Exception as e:
+                log.debug("sbc brightness get failed for %s: %s", name, e)
+                continue
+            with self._cond:
+                # Discard a reading that raced a newer write to the same display.
+                if self._write_gen[name] == gen and name not in self._writes:
+                    self._readings[name] = value
 
 
 class SbcBrightnessBackend:
@@ -39,6 +118,7 @@ class SbcBrightnessBackend:
         # list_monitors(); None means "not yet enumerated (or enumeration failed)".
         self._displays: dict = {}
         self._names: Optional[list] = None
+        self._worker = _BrightnessWorker()
 
     def list_monitors(self):
         if self._names is None:
@@ -105,17 +185,19 @@ class SbcBrightnessBackend:
         return None
 
     def set_brightness(self, value, display=None) -> None:
+        """Queue a brightness write. Writes are async and coalesced."""
         display_obj = self._displays.get(display) if isinstance(display, str) else None
         if display_obj is None:
             log.warning("set_brightness: no sbc display for %r", display)
             return
-        display_obj.set_brightness(value=value)
+        self._worker.submit_write(display, display_obj, value)
 
     def get_brightness(self, display=None) -> Optional[int]:
+        """Return the latest background reading, or None if none is ready yet."""
         display_obj = self._displays.get(display) if isinstance(display, str) else None
         if display_obj is None:
             return None
-        return display_obj.get_brightness()
+        return self._worker.latest_reading(display, display_obj)
 
     def cleanup(self) -> None:
-        pass
+        self._worker.stop()
