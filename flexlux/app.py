@@ -241,7 +241,9 @@ class FlexLuxApp(QWidget):
         else:
             new_height = single_height
         if self.warmth_slider is not None:
-            new_height += _SLIDER_HEIGHT
+            new_height += _SLIDER_HEIGHT + 30
+        if self.link_checkbox:
+            new_height += self.link_checkbox.sizeHint().height() + 10
         self.resize(new_width, new_height)
 
     def _build_sliders(self, layout):
@@ -251,7 +253,7 @@ class FlexLuxApp(QWidget):
         self._pages.addWidget(main_page)
         layout.addWidget(self._pages)
         layout = QVBoxLayout(main_page)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(8, 8, 8, 14)
         layout.setSpacing(2)
 
         zone_label_style = "color: #555555; font-size: 9px; margin: 0; padding: 0;"
@@ -300,8 +302,10 @@ class FlexLuxApp(QWidget):
         self.link_checkbox = None
         if multi:
             self.link_checkbox = QCheckBox("Link Monitors")
-            self.link_checkbox.setStyleSheet("color: #888888; font-size: 10px; margin-top: 4px;")
+            self.link_checkbox.setStyleSheet(_CHECKBOX_STYLE)
+            self.link_checkbox.setAttribute(Qt.WA_LayoutUsesWidgetRect)
             self.link_checkbox.setChecked(self.settings.value("link_monitors", True, type=bool))
+            layout.addSpacing(10)
             layout.addWidget(self.link_checkbox)
 
         self.warmth_checkbox = None
@@ -312,10 +316,12 @@ class FlexLuxApp(QWidget):
         self.schedule_end_edit = None
         if self._gamma is not None:
             row = QHBoxLayout()
-            row.setContentsMargins(0, 4, 0, 0)
+            row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(6)
+            layout.addSpacing(8)
             self.warmth_checkbox = QCheckBox("Warmth")
             self.warmth_checkbox.setStyleSheet(_CHECKBOX_STYLE)
+            self.warmth_checkbox.setAttribute(Qt.WA_LayoutUsesWidgetRect)
             self.warmth_slider = QSlider(Qt.Horizontal, self)
             self.warmth_slider.setAccessibleName("Screen warmth")
             self.warmth_slider.setStyleSheet(_slider_style(_WARMTH_GROOVE))
