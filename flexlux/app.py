@@ -1,18 +1,66 @@
 import logging
 import time
-from PyQt5.QtWidgets import QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu, QAction, QLabel, QMessageBox, QCheckBox, QToolTip
-from PyQt5.QtGui import QIcon, QCursor, QColor, QPainter, QPen
-from PyQt5.QtCore import Qt, QEvent, QTimer, QSettings, QRectF
+from PyQt5.QtWidgets import (QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu,
+                             QAction, QLabel, QMessageBox, QCheckBox, QToolTip, QStackedWidget, QPushButton,
+                             QTimeEdit, QAbstractSpinBox)
+from PyQt5.QtGui import QIcon, QCursor
+from PyQt5.QtCore import Qt, QEvent, QTimer, QSettings, QTime, QLocale
 
 from flexlux import VERSION
 from flexlux.brightness import get_backend, get_key_interceptor
 from flexlux.gamma import get_gamma_controller, warmth_rgb, warmth_kelvin
 from flexlux.overlay import OverlayWindow
-from flexlux.platform_ui import get_ui_config, WindowsBrightnessIcon, WindowsBrightnessSlider
+from flexlux.platform_ui import get_ui_config
 from flexlux.utils import resource_path
 from flexlux import autostart
 
 log = logging.getLogger("FlexLux")
+
+_SLIDER_HEIGHT = 40
+_SLIDER_HANDLE_STYLE = """
+    QSlider::handle:horizontal {
+        width: 24px;
+        background-color: white;
+        border-radius: 12px;
+        margin: -8px 0;
+    }
+"""
+
+
+def _slider_style(groove_background):
+    return f"""
+    .QSlider {{
+        max-height: {_SLIDER_HEIGHT}px;
+    }}
+    QSlider::groove:horizontal {{
+        height: 6px;
+        {groove_background}
+    }}
+    {_SLIDER_HANDLE_STYLE}
+    """
+
+
+_HW_GROOVE = "background-color: darkgray;"
+_OVERLAY_ONLY_GROOVE = ("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+                        "stop:0 darkgray, stop:0.499 darkgray, stop:0.5 #333333, stop:1 #333333);")
+_WARMTH_GROOVE = "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 darkgray, stop:1 #d9822b);"
+_CHECKBOX_STYLE = "QCheckBox { color: #888888; font-size: 10px; }"
+_NAV_BUTTON_STYLE = """
+    QPushButton {
+        color: #888888; background: transparent; border: none;
+        font-size: 12px; padding: 2px 4px;
+    }
+    QPushButton:hover { color: #dddddd; }
+"""
+_TIME_EDIT_STYLE = """
+    QTimeEdit {
+        color: #cccccc; background-color: #1c1c1c;
+        border: 1px solid #333333; border-radius: 3px;
+        padding: 2px 4px; font-size: 11px;
+    }
+    QTimeEdit:disabled { color: #444444; border-color: #222222; }
+"""
+_SMALL_LABEL_STYLE = "color: #666666; font-size: 10px;"
 
 
 class FlexLuxApp(QWidget):
@@ -30,6 +78,16 @@ class FlexLuxApp(QWidget):
         self._accessibility_notified = False
         self._last_hide_time = 0.0
         self._gamma_unlock_offered = False
+        self._warmth_mix = 0.0
+        self._fade_from = 0.0
+        self._fade_to = 0.0
+        self._fade_started = 0.0
+        self._fade_timer = QTimer()
+        self._fade_timer.setInterval(self._WARMTH_FADE_STEP_MS)
+        self._fade_timer.timeout.connect(self._fade_tick)
+        # Whether the clock was inside the schedule window at the last check;
+        # None forces the next check to apply the schedule.
+        self._schedule_was_in_window = None
         self._gamma = get_gamma_controller()
         self._detect_monitors()
         self._create_overlays()
@@ -52,6 +110,10 @@ class FlexLuxApp(QWidget):
         self._gamma_timer.timeout.connect(self._reapply_gamma)
         if self._gamma is not None:
             self._gamma_timer.start()
+        self._schedule_timer = QTimer()
+        self._schedule_timer.setInterval(self._SCHEDULE_CHECK_INTERVAL_MS)
+        self._schedule_timer.timeout.connect(lambda: self._check_schedule(fade=True))
+        self._schedule_timer.start()
 
         interceptor = get_key_interceptor()
         if interceptor is not None:
@@ -150,6 +212,11 @@ class FlexLuxApp(QWidget):
             self._set_warmth_controls(
                 self.settings.value("warmth/enabled", False, type=bool),
                 self.settings.value("warmth/level", self._WARMTH_DEFAULT_LEVEL, type=int))
+            self._set_schedule_controls(
+                self.settings.value("warmth/schedule_enabled", False, type=bool),
+                self.settings.value("warmth/schedule_start", self._SCHEDULE_DEFAULT_START, type=int),
+                self.settings.value("warmth/schedule_end", self._SCHEDULE_DEFAULT_END, type=int))
+            self._check_schedule(fade=False)
 
     def _save_settings(self):
         for i, name in enumerate(self.monitor_names):
@@ -159,14 +226,12 @@ class FlexLuxApp(QWidget):
         if self.warmth_slider is not None:
             self.settings.setValue("warmth/enabled", self.warmth_checkbox.isChecked())
             self.settings.setValue("warmth/level", self.warmth_slider.value())
+            self.settings.setValue("warmth/schedule_enabled", self.schedule_checkbox.isChecked())
+            self.settings.setValue("warmth/schedule_start", self._minutes(self.schedule_start_edit.time()))
+            self.settings.setValue("warmth/schedule_end", self._minutes(self.schedule_end_edit.time()))
         self.settings.sync()
 
     def adjust_window_size(self):
-        if self._ui.compact_panel:
-            available = QApplication.desktop().availableGeometry(QCursor.pos())
-            self.setFixedWidth(min(360, available.width() - 24))
-            self.setFixedHeight(self.layout().sizeHint().height())
-            return
         screen_width = QApplication.desktop().screenGeometry().width()
         new_width = int(0.15 * screen_width)
         single_height = int(new_width / 2.8)
@@ -176,46 +241,22 @@ class FlexLuxApp(QWidget):
         else:
             new_height = single_height
         if self.warmth_slider is not None:
-            new_height += self.warmth_checkbox.sizeHint().height() + self._ui.slider_max_height
+            new_height += _SLIDER_HEIGHT
         self.resize(new_width, new_height)
 
     def _build_sliders(self, layout):
-        if self._ui.compact_panel:
-            self._build_windows_sliders(layout)
-            return
-        handle_w = self._ui.slider_handle_width
-        handle_r = self._ui.slider_handle_radius
-        handle_m = self._ui.slider_handle_margin
-        groove_h = self._ui.slider_groove_height
-        max_h = self._ui.slider_max_height
+        # Page 0 holds the everyday controls; page 1 holds warmth settings.
+        self._pages = QStackedWidget(self)
+        main_page = QWidget(self._pages)
+        self._pages.addWidget(main_page)
+        layout.addWidget(self._pages)
+        layout = QVBoxLayout(main_page)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(2)
 
-        def _slider_style(hw_capable):
-            if hw_capable:
-                groove_bg = "background-color: darkgray;"
-            else:
-                groove_bg = ("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
-                             "stop:0 darkgray, stop:0.499 darkgray, "
-                             "stop:0.5 #333333, stop:1 #333333);")
-            return f"""
-            .QSlider {{
-                max-height: {max_h}px;
-            }}
-            QSlider::groove:horizontal {{
-                height: {groove_h}px;
-                {groove_bg}
-            }}
-            QSlider::handle:horizontal {{
-                width: {handle_w}px;
-                background-color: white;
-                border-radius: {handle_r}px;
-                margin: {handle_m}px 0;
-            }}
-            """
-
-        zfs = self._ui.zone_label_font_size
-        zone_label_style = f"color: #555555; font-size: {zfs}px; margin: 0; padding: 0;"
-        zone_label_disabled_style = f"color: #222222; font-size: {zfs}px; margin: 0; padding: 0;"
-        mid_label_style = f"color: #333333; font-size: {zfs}px; margin: 0; padding: 0;"
+        zone_label_style = "color: #555555; font-size: 9px; margin: 0; padding: 0;"
+        zone_label_disabled_style = "color: #222222; font-size: 9px; margin: 0; padding: 0;"
+        mid_label_style = "color: #333333; font-size: 9px; margin: 0; padding: 0;"
 
         self.sliders = []
         multi = len(self.monitor_names) > 1
@@ -231,7 +272,8 @@ class FlexLuxApp(QWidget):
             slider = QSlider(Qt.Horizontal, self)
             slider.setRange(0, 200)
             slider.setValue(100)
-            slider.setStyleSheet(_slider_style(hw))
+            slider.setAccessibleName(f"Brightness for {name}")
+            slider.setStyleSheet(_slider_style(_HW_GROOVE if hw else _OVERLAY_ONLY_GROOVE))
             slider.valueChanged[int].connect(lambda value, idx=i: self._snap_and_update(idx, value))
             layout.addWidget(slider)
 
@@ -242,7 +284,7 @@ class FlexLuxApp(QWidget):
             lbl_artificial.setAlignment(Qt.AlignCenter)
             lbl_artificial.setStyleSheet(zone_label_style)
             lbl_mid = QLabel("|")
-            lbl_mid.setFixedWidth(self._ui.mid_label_width)
+            lbl_mid.setFixedWidth(6)
             lbl_mid.setAlignment(Qt.AlignCenter)
             lbl_mid.setStyleSheet(mid_label_style)
             lbl_natural = QLabel("Natural")
@@ -264,104 +306,80 @@ class FlexLuxApp(QWidget):
 
         self.warmth_checkbox = None
         self.warmth_slider = None
+        self.warmth_more_button = None
+        self.schedule_checkbox = None
+        self.schedule_start_edit = None
+        self.schedule_end_edit = None
         if self._gamma is not None:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 4, 0, 0)
+            row.setSpacing(6)
             self.warmth_checkbox = QCheckBox("Warmth")
-            self.warmth_checkbox.setStyleSheet("color: #888888; font-size: 10px; margin-top: 4px;")
+            self.warmth_checkbox.setStyleSheet(_CHECKBOX_STYLE)
             self.warmth_slider = QSlider(Qt.Horizontal, self)
-            self.warmth_slider.setStyleSheet(f"""
-            .QSlider {{
-                max-height: {max_h}px;
-            }}
-            QSlider::groove:horizontal {{
-                height: {groove_h}px;
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 darkgray, stop:1 #d9822b);
-            }}
-            QSlider::handle:horizontal {{
-                width: {handle_w}px;
-                background-color: white;
-                border-radius: {handle_r}px;
-                margin: {handle_m}px 0;
-            }}
-            """)
-            self._wire_warmth_controls()
-            layout.addWidget(self.warmth_checkbox)
-            layout.addWidget(self.warmth_slider)
-
-    def _build_windows_sliders(self, layout):
-        self.sliders = []
-        self.link_checkbox = None
-        multi = len(self.monitor_names) > 1
-        for i, name in enumerate(self.monitor_names):
-            if multi:
-                label = QLabel(self)
-                label.setStyleSheet("color: #b8c2cd; font-size: 13px;")
-                label.setText(label.fontMetrics().elidedText(name, Qt.ElideRight, 300))
-                label.setToolTip(name)
-                layout.addWidget(label)
-
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(14)
-            row.addWidget(WindowsBrightnessIcon(True, "Extra screen dimming", self))
-            slider = WindowsBrightnessSlider(self._hw_capable[i], self.min_brightness, self)
-            slider.setAccessibleName(f"Brightness for {name}")
-            slider.valueChanged[int].connect(lambda value, idx=i: self._snap_and_update(idx, value))
-            row.addWidget(slider, 1)
-            bright_hint = "Monitor brightness" if self._hw_capable[i] else "No extra dimming"
-            row.addWidget(WindowsBrightnessIcon(False, bright_hint, self))
-            layout.addLayout(row)
-            self.sliders.append(slider)
-
-        if multi:
-            self.link_checkbox = QCheckBox("Link displays", self)
-            self.link_checkbox.setStyleSheet("""
-                QCheckBox { color: #b8c2cd; font-size: 13px; spacing: 8px; }
-                QCheckBox::indicator {
-                    width: 14px; height: 14px; border: 1px solid #65717f; border-radius: 4px;
-                }
-                QCheckBox::indicator:checked { background: #a6bdca; border-color: #a6bdca; }
-                QCheckBox::indicator:focus { border-color: #f1f5f9; }
-            """)
-            self.link_checkbox.setChecked(self.settings.value("link_monitors", True, type=bool))
-            layout.addWidget(self.link_checkbox, 0, Qt.AlignHCenter)
-
-        self.warmth_checkbox = None
-        self.warmth_slider = None
-        if self._gamma is not None:
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(14)
-            self.warmth_checkbox = QCheckBox("Warmth", self)
-            self.warmth_checkbox.setStyleSheet("""
-                QCheckBox { color: #b8c2cd; font-size: 13px; spacing: 8px; }
-                QCheckBox::indicator {
-                    width: 14px; height: 14px; border: 1px solid #65717f; border-radius: 4px;
-                }
-                QCheckBox::indicator:checked { background: #d9a066; border-color: #d9a066; }
-                QCheckBox::indicator:focus { border-color: #f1f5f9; }
-            """)
-            self.warmth_slider = QSlider(Qt.Horizontal, self)
-            self.warmth_slider.setFixedHeight(44)
-            self.warmth_slider.setCursor(Qt.PointingHandCursor)
             self.warmth_slider.setAccessibleName("Screen warmth")
-            self.warmth_slider.setStyleSheet("""
-                QSlider { background: transparent; padding: 0 5px; }
-                QSlider::groove:horizontal {
-                    height: 4px; background: #3b424c; border-radius: 2px;
-                }
-                QSlider::sub-page:horizontal {
-                    background: #d9a066; border-radius: 2px;
-                }
-                QSlider::handle:horizontal {
-                    width: 18px; margin: -7px 0;
-                    background: #f1f5f9; border-radius: 9px;
-                }
-                QSlider::handle:horizontal:pressed { background: #f3d2ad; }
-            """)
-            self._wire_warmth_controls()
+            self.warmth_slider.setStyleSheet(_slider_style(_WARMTH_GROOVE))
+            self.warmth_more_button = QPushButton()
+            self.warmth_more_button.setStyleSheet(_NAV_BUTTON_STYLE)
+            self.warmth_more_button.setCursor(Qt.PointingHandCursor)
+            self.warmth_more_button.setAccessibleName("Warmth schedule")
+            self.warmth_more_button.clicked.connect(lambda: self._pages.setCurrentIndex(1))
             row.addWidget(self.warmth_checkbox)
             row.addWidget(self.warmth_slider, 1)
+            row.addWidget(self.warmth_more_button)
             layout.addLayout(row)
+            self._pages.addWidget(self._build_warmth_page())
+            self._wire_warmth_controls()
+
+    def _build_warmth_page(self):
+        page = QWidget(self._pages)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setSpacing(2)
+        back_button = QPushButton("‹")
+        back_button.setStyleSheet(_NAV_BUTTON_STYLE)
+        back_button.setCursor(Qt.PointingHandCursor)
+        back_button.setAccessibleName("Back")
+        back_button.clicked.connect(lambda: self._pages.setCurrentIndex(0))
+        title = QLabel("Warmth")
+        title.setStyleSheet("color: #aaaaaa; font-size: 11px;")
+        header.addWidget(back_button)
+        header.addWidget(title)
+        header.addStretch(1)
+        layout.addLayout(header)
+
+        self.schedule_checkbox = QCheckBox("Schedule")
+        self.schedule_checkbox.setStyleSheet(_CHECKBOX_STYLE)
+        layout.addWidget(self.schedule_checkbox)
+
+        times = QHBoxLayout()
+        times.setSpacing(6)
+        self.schedule_start_edit = self._make_time_edit("Warmth starts at")
+        self.schedule_end_edit = self._make_time_edit("Warmth ends at")
+        from_label = QLabel("From")
+        from_label.setStyleSheet(_SMALL_LABEL_STYLE)
+        to_label = QLabel("to")
+        to_label.setStyleSheet(_SMALL_LABEL_STYLE)
+        times.addWidget(from_label)
+        times.addWidget(self.schedule_start_edit, 1)
+        times.addWidget(to_label)
+        times.addWidget(self.schedule_end_edit, 1)
+        layout.addLayout(times)
+        layout.addStretch(1)
+        return page
+
+    @staticmethod
+    def _make_time_edit(accessible_name):
+        edit = QTimeEdit()
+        edit.setDisplayFormat(QLocale.system().timeFormat(QLocale.ShortFormat))
+        edit.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        edit.setAlignment(Qt.AlignCenter)
+        edit.setStyleSheet(_TIME_EDIT_STYLE)
+        edit.setAccessibleName(accessible_name)
+        return edit
 
     def _clear_layout(self, layout):
         while layout.count():
@@ -412,26 +430,12 @@ class FlexLuxApp(QWidget):
 
     def initUI(self):
         layout = QVBoxLayout()
-        if self._ui.compact_panel:
-            layout.setContentsMargins(22, 22, 22, 22)
-            layout.setSpacing(8)
-        else:
-            layout.setContentsMargins(8, 8, 8, 8)
-            layout.setSpacing(2)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         self._build_sliders(layout)
 
-        if self._ui.compact_panel:
-            self.setAttribute(Qt.WA_TranslucentBackground)
-            self.setStyleSheet("""
-                QWidget { background: transparent; font-family: 'Segoe UI'; }
-                QToolTip {
-                    color: #edf2f7; background: #262c35; border: 1px solid #49525e;
-                    padding: 8px 12px; font-size: 13px;
-                }
-            """)
-        else:
-            self.setStyleSheet("background-color: #111111;")
+        self.setStyleSheet("background-color: #111111;")
         self.setLayout(layout)
 
         self.adjust_window_size()
@@ -473,16 +477,6 @@ class FlexLuxApp(QWidget):
 
         if self._ui.use_event_filter:
             QApplication.instance().installEventFilter(self)
-
-    def paintEvent(self, event):
-        if not self._ui.compact_panel:
-            super().paintEvent(event)
-            return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(QPen(QColor("#3c444f"), 1))
-        painter.setBrush(QColor("#1b2028"))
-        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 16, 16)
 
     def _set_hardware_brightness(self, value, display):
         """Set hardware brightness (0-100) using the platform-appropriate backend."""
@@ -622,6 +616,11 @@ class FlexLuxApp(QWidget):
     _KEY_MIN_VALUE = 0
     _GAMMA_REAPPLY_INTERVAL_MS = 2000
     _WARMTH_DEFAULT_LEVEL = 40
+    _WARMTH_FADE_SECONDS = 180
+    _WARMTH_FADE_STEP_MS = 500
+    _SCHEDULE_CHECK_INTERVAL_MS = 30000
+    _SCHEDULE_DEFAULT_START = 21 * 60
+    _SCHEDULE_DEFAULT_END = 7 * 60
 
     def _snap_and_update(self, monitor_idx, value):
         if not self._hw_capable[monitor_idx] and value > 100:
@@ -683,6 +682,12 @@ class FlexLuxApp(QWidget):
         self._update_warmth_tooltip()
         self.warmth_checkbox.toggled.connect(self._on_warmth_toggled)
         self.warmth_slider.valueChanged[int].connect(self._on_warmth_level_changed)
+        self.schedule_start_edit.setTime(self._time_from_minutes(self._SCHEDULE_DEFAULT_START))
+        self.schedule_end_edit.setTime(self._time_from_minutes(self._SCHEDULE_DEFAULT_END))
+        self._update_schedule_controls()
+        self.schedule_checkbox.toggled.connect(self._on_schedule_settings_changed)
+        self.schedule_start_edit.timeChanged.connect(self._on_schedule_settings_changed)
+        self.schedule_end_edit.timeChanged.connect(self._on_schedule_settings_changed)
 
     def _set_warmth_controls(self, enabled, level):
         """Set warmth widgets without their change handlers, then apply once."""
@@ -693,13 +698,17 @@ class FlexLuxApp(QWidget):
         self.warmth_checkbox.blockSignals(False)
         self.warmth_slider.blockSignals(False)
         self._update_warmth_tooltip()
+        self._fade_timer.stop()
+        self._warmth_mix = 1.0 if enabled else 0.0
         self._apply_warmth()
 
     def _update_warmth_tooltip(self):
         kelvin = warmth_kelvin(self.warmth_slider.value() / 100)
         self.warmth_slider.setToolTip(f"Warmth  ·  {kelvin}K")
 
-    def _on_warmth_toggled(self, _checked):
+    def _on_warmth_toggled(self, checked):
+        self._fade_timer.stop()
+        self._warmth_mix = 1.0 if checked else 0.0
         self._apply_warmth()
         self._save_timer.start()
 
@@ -715,9 +724,99 @@ class FlexLuxApp(QWidget):
         self._save_timer.start()
 
     def _apply_warmth(self):
-        strength = self.warmth_slider.value() / 100 if self.warmth_checkbox.isChecked() else 0.0
+        # The mix is 0 or 1 except while a scheduled change fades in or out.
+        strength = self.warmth_slider.value() / 100 * self._warmth_mix
         if not self._gamma.set_warmth(warmth_rgb(strength)):
             self._offer_gamma_unlock()
+
+    def _set_warmth_on(self, on, fade):
+        """Turn warmth on or off for the schedule, optionally fading."""
+        self.warmth_checkbox.blockSignals(True)
+        self.warmth_checkbox.setChecked(on)
+        self.warmth_checkbox.blockSignals(False)
+        target = 1.0 if on else 0.0
+        if fade:
+            self._fade_from = self._warmth_mix
+            self._fade_to = target
+            self._fade_started = time.monotonic()
+            self._fade_timer.start()
+        else:
+            self._fade_timer.stop()
+            self._warmth_mix = target
+            self._apply_warmth()
+        self._save_timer.start()
+
+    def _fade_tick(self):
+        if self.warmth_slider is None:
+            self._fade_timer.stop()
+            return
+        progress = min(1.0, (time.monotonic() - self._fade_started) / self._WARMTH_FADE_SECONDS)
+        self._warmth_mix = self._fade_from + (self._fade_to - self._fade_from) * progress
+        self._apply_warmth()
+        if progress >= 1.0:
+            self._fade_timer.stop()
+
+    @staticmethod
+    def _minutes(qtime):
+        return qtime.hour() * 60 + qtime.minute()
+
+    @staticmethod
+    def _time_from_minutes(minutes):
+        return QTime(minutes // 60 % 24, minutes % 60)
+
+    def _set_schedule_controls(self, enabled, start, end):
+        """Set schedule widgets without their change handlers."""
+        widgets = (self.schedule_checkbox, self.schedule_start_edit, self.schedule_end_edit)
+        for widget in widgets:
+            widget.blockSignals(True)
+        self.schedule_checkbox.setChecked(enabled)
+        self.schedule_start_edit.setTime(self._time_from_minutes(start))
+        self.schedule_end_edit.setTime(self._time_from_minutes(end))
+        for widget in widgets:
+            widget.blockSignals(False)
+        self._update_schedule_controls()
+
+    def _update_schedule_controls(self):
+        scheduled = self.schedule_checkbox.isChecked()
+        self.schedule_start_edit.setEnabled(scheduled)
+        self.schedule_end_edit.setEnabled(scheduled)
+        if scheduled:
+            locale = QLocale.system()
+            start = locale.toString(self.schedule_start_edit.time(), QLocale.ShortFormat)
+            end = locale.toString(self.schedule_end_edit.time(), QLocale.ShortFormat)
+            self.warmth_more_button.setText("Auto ›")
+            self.warmth_more_button.setToolTip(f"Warmth schedule  ·  {start}–{end}")
+        else:
+            self.warmth_more_button.setText("›")
+            self.warmth_more_button.setToolTip("Warmth schedule")
+
+    def _on_schedule_settings_changed(self, *_):
+        self._update_schedule_controls()
+        # A changed schedule takes over immediately, replacing any manual override.
+        self._schedule_was_in_window = None
+        self._check_schedule(fade=False)
+        self._save_timer.start()
+
+    def _check_schedule(self, fade):
+        """Switch warmth when the clock crosses into or out of the schedule.
+
+        Warmth changes only at those crossings, so a manual toggle holds until
+        the next scheduled start or end.
+        """
+        if self.warmth_slider is None or not self.schedule_checkbox.isChecked():
+            return
+        now = self._minutes(QTime.currentTime())
+        start = self._minutes(self.schedule_start_edit.time())
+        end = self._minutes(self.schedule_end_edit.time())
+        if start <= end:
+            in_window = start <= now < end
+        else:
+            in_window = now >= start or now < end
+        if in_window == self._schedule_was_in_window:
+            return
+        self._schedule_was_in_window = in_window
+        if in_window != self.warmth_checkbox.isChecked():
+            self._set_warmth_on(in_window, fade)
 
     def _offer_gamma_unlock(self):
         """Once per run, point the user at lifting the OS gamma limit."""
@@ -796,6 +895,9 @@ class FlexLuxApp(QWidget):
             self.link_checkbox.setChecked(True)
         if self.warmth_slider is not None:
             self._set_warmth_controls(False, self._WARMTH_DEFAULT_LEVEL)
+            self._set_schedule_controls(False, self._SCHEDULE_DEFAULT_START, self._SCHEDULE_DEFAULT_END)
+            self._schedule_was_in_window = None
+        self._pages.setCurrentIndex(0)
         self.adjust_window_size()
 
     def toggle_window(self):
@@ -824,7 +926,7 @@ class FlexLuxApp(QWidget):
 
     def updatePosition(self):
         cursor_pos = QCursor.pos()
-        if self._ui.compact_panel:
+        if not self._ui.panel_y_from_top:
             # Work-area coordinates also handle non-primary screens and taskbars
             # placed on any edge, without covering the taskbar itself.
             available = QApplication.desktop().availableGeometry(cursor_pos)
@@ -839,11 +941,7 @@ class FlexLuxApp(QWidget):
         window_height = self.height()
 
         x = cursor_pos.x() - window_width // 2
-
-        if self._ui.panel_y_from_top:
-            y = screen_geometry.y() + self._ui.panel_top_offset
-        else:
-            y = screen_geometry.height() - window_height - self._ui.panel_bottom_offset
+        y = screen_geometry.y() + self._ui.panel_top_offset
 
         x = max(screen_geometry.x(), min(x, screen_geometry.x() + screen_geometry.width() - window_width))
         y = max(screen_geometry.y(), min(y, screen_geometry.y() + screen_geometry.height() - window_height))
@@ -856,6 +954,7 @@ class FlexLuxApp(QWidget):
         # consistent no matter how the panel was dismissed.
         self._last_hide_time = time.monotonic()
         self._set_poll_speed(fast=False)
+        self._pages.setCurrentIndex(0)
         super().hideEvent(event)
 
     def check_focus_and_hide(self):
@@ -886,6 +985,9 @@ class FlexLuxApp(QWidget):
             self._poll_timer.stop()
         if hasattr(self, '_gamma_timer'):
             self._gamma_timer.stop()
+        if hasattr(self, '_schedule_timer'):
+            self._schedule_timer.stop()
+        self._fade_timer.stop()
         if self._gamma is not None:
             self._gamma.restore()
         if hasattr(self, '_backend') and self._backend:

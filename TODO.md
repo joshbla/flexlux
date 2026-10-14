@@ -2,6 +2,7 @@
 
 ## Verification
 
+- Verify the shared black panel on real Windows and Linux: it matches macOS, sits above the taskbar on the screen under the cursor (Linux now uses the same work-area placement as Windows, which should fix stacked secondary screens), and the warmth page's time fields accept typing. Checked only on macOS.
 - Verify warmth on real Windows hardware: the slider tints every display, the default gamma limit triggers the "Allow Stronger Warmth" offer, the elevated registry change works after sign-in, and quitting restores neutral color. Untested; written on macOS.
 - Verify warmth on Linux X11 (XRandR gamma): tint applies per CRTC, quitting restores, and the panel hides warmth under Wayland. Untested.
 
@@ -11,7 +12,6 @@
 
 - Windows/Linux: monitors are matched to screens by list order because the sbc backend reports no display bounds, so dimming one monitor's slider can darken a different screen. This positional mapping is also a hidden fallback in the overlay setup.
 - Windows/Linux: monitors are marked hardware-capable without probing DDC/CI, so a blocked monitor (KVM/hub) shows a working right half that does nothing. macOS already probes. A failing monitor also keeps the background brightness worker busy with multi-second retries, delaying writes to other monitors.
-- Linux: the bottom-anchored panel position ignores the screen's vertical offset, so it can land at the wrong height on a stacked secondary screen. Windows was fixed in v1.7.0.
 - macOS: "Launch at Startup" saved the App Translocation path when the app was first run from a quarantined download, so login launch silently failed (launchd exit 78). Write a stable path or refuse to enable autostart while translocated.
 - macOS: when launched at login, m1ddc is not found because launchd's PATH excludes `/opt/homebrew/bin`, so external hardware brightness is unavailable until FlexLux is relaunched from a shell. The login-launched app logged no DDC/CI probe at all.
 - macOS: the brightness-key interceptor logs to `flexlux.brightness.mac_keys` instead of the `FlexLux` logger, so its start/failure messages never reach `FlexLux.log`.

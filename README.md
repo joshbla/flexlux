@@ -121,6 +121,8 @@ On macOS, displays that are mirroring each other are darkened through each displ
 
 The **Warmth** checkbox and slider below the brightness controls tint every display toward orange, from neutral (6500K) at the left to 1200K at the right; about a third of the way along matches macOS Night Shift's warmest setting. Moving the slider turns warmth on; the checkbox turns it off without losing the level. Warmth works on displays that Night Shift skips, such as TVs.
 
+The arrow at the end of the warmth row opens the warmth page, where **Schedule** turns warmth on and off at fixed times from the system clock. Scheduled changes fade in and out over a few minutes, and the arrow reads **Auto** while a schedule is set. Turning warmth on or off by hand holds until the next scheduled start or end; editing the schedule applies it right away.
+
 Warmth and mirrored-display dimming write each display's gamma ramp. Other apps that also write it, such as f.lux, fight with FlexLux and cause flicker; quit them while using these features. FlexLux puts the original ramps back when it quits.
 
 - **Windows**: by default Windows refuses strong gamma changes, so very warm settings are weakened. When that happens FlexLux offers **Allow Stronger Warmth...** in the tray menu, which asks for administrator approval to set the `GdiIcmGammaRange` registry value; sign out and back in for it to take effect. Gamma changes do not apply to displays running in HDR mode.
