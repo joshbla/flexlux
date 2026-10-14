@@ -16,7 +16,7 @@ from flexlux import autostart
 
 log = logging.getLogger("FlexLux")
 
-_SLIDER_HEIGHT = 40
+_SLIDER_HEIGHT = 28
 _SLIDER_HANDLE_STYLE = """
     QSlider::handle:horizontal {
         width: 24px;
@@ -30,6 +30,7 @@ _SLIDER_HANDLE_STYLE = """
 def _slider_style(groove_background):
     return f"""
     .QSlider {{
+        min-height: {_SLIDER_HEIGHT}px;
         max-height: {_SLIDER_HEIGHT}px;
     }}
     QSlider::groove:horizontal {{
@@ -233,18 +234,8 @@ class FlexLuxApp(QWidget):
 
     def adjust_window_size(self):
         screen_width = QApplication.desktop().screenGeometry().width()
-        new_width = int(0.15 * screen_width)
-        single_height = int(new_width / 2.8)
-        n = len(self.monitor_names)
-        if n > 1:
-            new_height = single_height * n + 16 * (n - 1)
-        else:
-            new_height = single_height
-        if self.warmth_slider is not None:
-            new_height += _SLIDER_HEIGHT + 30
-        if self.link_checkbox:
-            new_height += self.link_checkbox.sizeHint().height() + 10
-        self.resize(new_width, new_height)
+        self.layout().activate()
+        self.setFixedSize(int(0.15 * screen_width), self.layout().sizeHint().height())
 
     def _build_sliders(self, layout):
         # Page 0 holds the everyday controls; page 1 holds warmth settings.
@@ -253,12 +244,21 @@ class FlexLuxApp(QWidget):
         self._pages.addWidget(main_page)
         layout.addWidget(self._pages)
         layout = QVBoxLayout(main_page)
-        layout.setContentsMargins(8, 8, 8, 14)
-        layout.setSpacing(2)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(4)
 
-        zone_label_style = "color: #555555; font-size: 9px; margin: 0; padding: 0;"
-        zone_label_disabled_style = "color: #222222; font-size: 9px; margin: 0; padding: 0;"
-        mid_label_style = "color: #333333; font-size: 9px; margin: 0; padding: 0;"
+        # The zone names apply to every slider, so they head the column once.
+        zone_style = "color: #555555; font-size: 9px;"
+        zone_row = QHBoxLayout()
+        zone_row.setContentsMargins(0, 0, 0, 0)
+        zone_row.setSpacing(0)
+        for text, stretch in (("Artificial", 1), ("|", 0), ("Natural", 1)):
+            zone_label = QLabel(text)
+            zone_label.setAlignment(Qt.AlignCenter)
+            zone_label.setStyleSheet(zone_style if stretch else "color: #333333; font-size: 9px;")
+            zone_row.addWidget(zone_label, stretch)
+        layout.addLayout(zone_row)
+        layout.addSpacing(2)
 
         self.sliders = []
         multi = len(self.monitor_names) > 1
@@ -267,6 +267,8 @@ class FlexLuxApp(QWidget):
             hw = self._hw_capable[i]
 
             if multi:
+                if i > 0:
+                    layout.addSpacing(6)
                 label = QLabel(name)
                 label.setStyleSheet("color: #888888; font-size: 10px; margin: 0; padding: 0;")
                 layout.addWidget(label)
@@ -278,25 +280,6 @@ class FlexLuxApp(QWidget):
             slider.setStyleSheet(_slider_style(_HW_GROOVE if hw else _OVERLAY_ONLY_GROOVE))
             slider.valueChanged[int].connect(lambda value, idx=i: self._snap_and_update(idx, value))
             layout.addWidget(slider)
-
-            zone_row = QHBoxLayout()
-            zone_row.setContentsMargins(0, 0, 0, 0)
-            zone_row.setSpacing(0)
-            lbl_artificial = QLabel("Artificial")
-            lbl_artificial.setAlignment(Qt.AlignCenter)
-            lbl_artificial.setStyleSheet(zone_label_style)
-            lbl_mid = QLabel("|")
-            lbl_mid.setFixedWidth(6)
-            lbl_mid.setAlignment(Qt.AlignCenter)
-            lbl_mid.setStyleSheet(mid_label_style)
-            lbl_natural = QLabel("Natural")
-            lbl_natural.setAlignment(Qt.AlignCenter)
-            lbl_natural.setStyleSheet(zone_label_style if hw else zone_label_disabled_style)
-            zone_row.addWidget(lbl_artificial, 1)
-            zone_row.addWidget(lbl_mid, 0)
-            zone_row.addWidget(lbl_natural, 1)
-            layout.addLayout(zone_row)
-
             self.sliders.append(slider)
 
         self.link_checkbox = None
@@ -305,7 +288,7 @@ class FlexLuxApp(QWidget):
             self.link_checkbox.setStyleSheet(_CHECKBOX_STYLE)
             self.link_checkbox.setAttribute(Qt.WA_LayoutUsesWidgetRect)
             self.link_checkbox.setChecked(self.settings.value("link_monitors", True, type=bool))
-            layout.addSpacing(10)
+            layout.addSpacing(6)
             layout.addWidget(self.link_checkbox)
 
         self.warmth_checkbox = None
@@ -318,7 +301,7 @@ class FlexLuxApp(QWidget):
             row = QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(6)
-            layout.addSpacing(8)
+            layout.addSpacing(4)
             self.warmth_checkbox = QCheckBox("Warmth")
             self.warmth_checkbox.setStyleSheet(_CHECKBOX_STYLE)
             self.warmth_checkbox.setAttribute(Qt.WA_LayoutUsesWidgetRect)
