@@ -1,9 +1,9 @@
 import logging
 import time
 from PyQt5.QtWidgets import (QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu,
-                             QAction, QLabel, QMessageBox, QCheckBox, QToolTip, QStackedWidget, QPushButton,
+                             QAction, QLabel, QMessageBox, QToolTip, QStackedWidget, QPushButton,
                              QTimeEdit, QAbstractSpinBox)
-from PyQt5.QtGui import QIcon, QCursor
+from PyQt5.QtGui import QIcon, QCursor, QColor, QPainter
 from PyQt5.QtCore import Qt, QEvent, QTimer, QSettings, QTime, QLocale
 
 from flexlux import VERSION
@@ -12,6 +12,7 @@ from flexlux.gamma import get_gamma_controller, warmth_rgb, warmth_kelvin
 from flexlux.overlay import OverlayWindow
 from flexlux.platform_ui import get_ui_config
 from flexlux.utils import resource_path
+from flexlux.widgets import PanelCheckBox
 from flexlux import autostart
 
 log = logging.getLogger("FlexLux")
@@ -284,9 +285,8 @@ class FlexLuxApp(QWidget):
 
         self.link_checkbox = None
         if multi:
-            self.link_checkbox = QCheckBox("Link Monitors")
+            self.link_checkbox = PanelCheckBox("Link Monitors")
             self.link_checkbox.setStyleSheet(_CHECKBOX_STYLE)
-            self.link_checkbox.setAttribute(Qt.WA_LayoutUsesWidgetRect)
             self.link_checkbox.setChecked(self.settings.value("link_monitors", True, type=bool))
             layout.addSpacing(6)
             layout.addWidget(self.link_checkbox)
@@ -302,9 +302,8 @@ class FlexLuxApp(QWidget):
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(6)
             layout.addSpacing(4)
-            self.warmth_checkbox = QCheckBox("Warmth")
+            self.warmth_checkbox = PanelCheckBox("Warmth")
             self.warmth_checkbox.setStyleSheet(_CHECKBOX_STYLE)
-            self.warmth_checkbox.setAttribute(Qt.WA_LayoutUsesWidgetRect)
             self.warmth_slider = QSlider(Qt.Horizontal, self)
             self.warmth_slider.setAccessibleName("Screen warmth")
             self.warmth_slider.setStyleSheet(_slider_style(_WARMTH_GROOVE))
@@ -340,7 +339,7 @@ class FlexLuxApp(QWidget):
         header.addStretch(1)
         layout.addLayout(header)
 
-        self.schedule_checkbox = QCheckBox("Schedule")
+        self.schedule_checkbox = PanelCheckBox("Schedule")
         self.schedule_checkbox.setStyleSheet(_CHECKBOX_STYLE)
         layout.addWidget(self.schedule_checkbox)
 
@@ -419,7 +418,8 @@ class FlexLuxApp(QWidget):
 
     def initUI(self):
         layout = QVBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
+        # Leave room for the outline drawn in paintEvent.
+        layout.setContentsMargins(1, 1, 1, 1)
         layout.setSpacing(0)
 
         self._build_sliders(layout)
@@ -466,6 +466,12 @@ class FlexLuxApp(QWidget):
 
         if self._ui.use_event_filter:
             QApplication.instance().installEventFilter(self)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setPen(QColor("#3a3a3a"))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
 
     def _set_hardware_brightness(self, value, display):
         """Set hardware brightness (0-100) using the platform-appropriate backend."""
