@@ -2,7 +2,7 @@ import logging
 import time
 from PyQt5.QtWidgets import (QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu,
                              QAction, QLabel, QMessageBox, QToolTip, QStackedWidget, QPushButton,
-                             QTimeEdit, QAbstractSpinBox)
+                             QTimeEdit, QAbstractSpinBox, QGridLayout)
 from PyQt5.QtGui import QIcon, QCursor, QColor, QPainter
 from PyQt5.QtCore import Qt, QEvent, QTimer, QSettings, QTime, QLocale
 
@@ -11,6 +11,8 @@ from flexlux.brightness import get_backend, get_key_interceptor
 from flexlux.gamma import get_gamma_controller, warmth_rgb, warmth_kelvin
 from flexlux.overlay import OverlayWindow
 from flexlux.platform_ui import get_ui_config
+from flexlux.schedule import (DailySchedule, DAY, WIND_DOWN, NIGHT, WAKE_UP, scheduled_warmth,
+                              scheduled_brightness, step_toward)
 from flexlux.utils import resource_path
 from flexlux.widgets import PanelCheckBox
 from flexlux import autostart
@@ -22,7 +24,7 @@ _SLIDER_HANDLE_STYLE = """
     QSlider::handle:horizontal {
         width: 24px;
         background-color: white;
-        border-radius: 12px;
+        border-radius: 11px;
         margin: -8px 0;
     }
 """
@@ -63,6 +65,8 @@ _TIME_EDIT_STYLE = """
     QTimeEdit:disabled { color: #444444; border-color: #222222; }
 """
 _SMALL_LABEL_STYLE = "color: #666666; font-size: 10px;"
+_WARNING_LABEL_STYLE = "color: #c08040; font-size: 10px;"
+_PHASE_NAMES = {DAY: "Day", WIND_DOWN: "Winding down", NIGHT: "Night", WAKE_UP: "Waking up"}
 
 
 class FlexLuxApp(QWidget):
@@ -80,16 +84,24 @@ class FlexLuxApp(QWidget):
         self._accessibility_notified = False
         self._last_hide_time = 0.0
         self._gamma_unlock_offered = False
-        self._warmth_mix = 0.0
-        self._fade_from = 0.0
-        self._fade_to = 0.0
-        self._fade_started = 0.0
-        self._fade_timer = QTimer()
-        self._fade_timer.setInterval(self._WARMTH_FADE_STEP_MS)
-        self._fade_timer.timeout.connect(self._fade_tick)
-        # Whether the clock was inside the schedule window at the last check;
-        # None forces the next check to apply the schedule.
-        self._schedule_was_in_window = None
+        # Applied warmth (0.0-1.0). The schedule moves it in finer steps than
+        # the slider shows.
+        self._warmth_strength = 0.0
+        self._schedule = self._SCHEDULE_DEFAULT
+        self._schedule_enabled = False
+        self._schedule_paused = False
+        self._night_warmth = self._SCHEDULE_DEFAULT_NIGHT_WARMTH
+        self._night_brightness = self._SCHEDULE_DEFAULT_NIGHT_BRIGHTNESS
+        self._day_brightness = {}
+        # True while FlexLux itself moves the controls, so the change is not
+        # mistaken for the user's.
+        self._driving = False
+        self._schedule_moved_hw_at = 0.0
+        # Large scheduled changes (startup, resume, wake from sleep) move in
+        # small steps on this timer instead of jumping.
+        self._slew_timer = QTimer()
+        self._slew_timer.setInterval(self._SCHEDULE_SLEW_INTERVAL_MS)
+        self._slew_timer.timeout.connect(self._schedule_step)
         self._gamma = get_gamma_controller()
         self._detect_monitors()
         self._create_overlays()
@@ -114,7 +126,7 @@ class FlexLuxApp(QWidget):
             self._gamma_timer.start()
         self._schedule_timer = QTimer()
         self._schedule_timer.setInterval(self._SCHEDULE_CHECK_INTERVAL_MS)
-        self._schedule_timer.timeout.connect(lambda: self._check_schedule(fade=True))
+        self._schedule_timer.timeout.connect(self._schedule_step)
         self._schedule_timer.start()
 
         interceptor = get_key_interceptor()
@@ -196,29 +208,68 @@ class FlexLuxApp(QWidget):
             self._overlay_for_monitor = [0 if k is None else None for k in self._gamma_keys]
 
     def _restore_settings(self):
-        for i, name in enumerate(self.monitor_names):
-            key = f"brightness/{name}"
-            saved = self.settings.value(key, None)
-            if saved is None:
-                continue
-            try:
-                value = int(saved)
-            except (ValueError, TypeError):
-                log.warning("Ignoring corrupt saved brightness value for %s: %r",
-                            name, saved)
-                continue
-            upper = 200 if self._hw_capable[i] else 100
-            value = max(0, min(upper, value))
-            self.sliders[i].setValue(value)
+        self._driving = True
+        try:
+            for i, name in enumerate(self.monitor_names):
+                key = f"brightness/{name}"
+                saved = self.settings.value(key, None)
+                if saved is None:
+                    continue
+                try:
+                    value = int(saved)
+                except (ValueError, TypeError):
+                    log.warning("Ignoring corrupt saved brightness value for %s: %r",
+                                name, saved)
+                    continue
+                upper = 200 if self._hw_capable[i] else 100
+                value = max(0, min(upper, value))
+                self.sliders[i].setValue(value)
+        finally:
+            self._driving = False
         if self.warmth_slider is not None:
             self._set_warmth_controls(
                 self.settings.value("warmth/enabled", False, type=bool),
                 self.settings.value("warmth/level", self._WARMTH_DEFAULT_LEVEL, type=int))
-            self._set_schedule_controls(
-                self.settings.value("warmth/schedule_enabled", False, type=bool),
-                self.settings.value("warmth/schedule_start", self._SCHEDULE_DEFAULT_START, type=int),
-                self.settings.value("warmth/schedule_end", self._SCHEDULE_DEFAULT_END, type=int))
-            self._check_schedule(fade=False)
+        self._load_schedule()
+        self._sync_schedule_widgets()
+        self._schedule_step()
+
+    def _load_schedule(self):
+        s = self.settings
+        if not s.contains("schedule/enabled") and s.contains("warmth/schedule_enabled"):
+            # The old warmth-only window becomes the daily schedule; its times
+            # do not carry over.
+            s.setValue("schedule/enabled", s.value("warmth/schedule_enabled", False, type=bool))
+            for key in ("warmth/schedule_enabled", "warmth/schedule_start", "warmth/schedule_end"):
+                s.remove(key)
+            log.info("Moved the warmth schedule setting to the daily schedule")
+        self._schedule_enabled = s.value("schedule/enabled", False, type=bool)
+        self._schedule_paused = s.value("schedule/paused", False, type=bool)
+        default = self._SCHEDULE_DEFAULT
+        schedule = DailySchedule(
+            s.value("schedule/wind_down_start", default.wind_down_start, type=int),
+            s.value("schedule/night_start", default.night_start, type=int),
+            s.value("schedule/wake_start", default.wake_start, type=int),
+            s.value("schedule/day_start", default.day_start, type=int))
+        if schedule.is_valid():
+            self._schedule = schedule
+        else:
+            log.warning("Ignoring saved schedule with times out of order: %s", schedule)
+            self._schedule = default
+        self._night_warmth = max(0, min(100, s.value(
+            "schedule/night_warmth", self._SCHEDULE_DEFAULT_NIGHT_WARMTH, type=int)))
+        self._night_brightness = max(0, min(100, s.value(
+            "schedule/night_brightness", self._SCHEDULE_DEFAULT_NIGHT_BRIGHTNESS, type=int)))
+        self._day_brightness = {}
+        for i, name in enumerate(self.monitor_names):
+            key = f"schedule/day_brightness/{name}"
+            if s.contains(key):
+                upper = 200 if self._hw_capable[i] else 100
+                self._day_brightness[name] = max(0, min(upper, s.value(key, type=int)))
+            else:
+                # A monitor the schedule has not seen yet keeps its current
+                # setting as its daytime brightness.
+                self._day_brightness[name] = self.sliders[i].value()
 
     def _save_settings(self):
         for i, name in enumerate(self.monitor_names):
@@ -228,9 +279,16 @@ class FlexLuxApp(QWidget):
         if self.warmth_slider is not None:
             self.settings.setValue("warmth/enabled", self.warmth_checkbox.isChecked())
             self.settings.setValue("warmth/level", self.warmth_slider.value())
-            self.settings.setValue("warmth/schedule_enabled", self.schedule_checkbox.isChecked())
-            self.settings.setValue("warmth/schedule_start", self._minutes(self.schedule_start_edit.time()))
-            self.settings.setValue("warmth/schedule_end", self._minutes(self.schedule_end_edit.time()))
+        self.settings.setValue("schedule/enabled", self._schedule_enabled)
+        self.settings.setValue("schedule/paused", self._schedule_paused)
+        self.settings.setValue("schedule/wind_down_start", self._schedule.wind_down_start)
+        self.settings.setValue("schedule/night_start", self._schedule.night_start)
+        self.settings.setValue("schedule/wake_start", self._schedule.wake_start)
+        self.settings.setValue("schedule/day_start", self._schedule.day_start)
+        self.settings.setValue("schedule/night_warmth", self._night_warmth)
+        self.settings.setValue("schedule/night_brightness", self._night_brightness)
+        for name, value in self._day_brightness.items():
+            self.settings.setValue(f"schedule/day_brightness/{name}", value)
         self.settings.sync()
 
     def adjust_window_size(self):
@@ -238,8 +296,18 @@ class FlexLuxApp(QWidget):
         self.layout().activate()
         self.setFixedSize(int(0.15 * screen_width), self.layout().sizeHint().height())
 
+    def _fit_current_page(self):
+        """Size the stack to the visible page; it otherwise takes the tallest one."""
+        self._pages.setFixedHeight(self._pages.currentWidget().sizeHint().height())
+
+    def _on_page_changed(self, _index):
+        self._fit_current_page()
+        self.adjust_window_size()
+        if self.isVisible():
+            self.updatePosition()
+
     def _build_sliders(self, layout):
-        # Page 0 holds the everyday controls; page 1 holds warmth settings.
+        # Page 0 holds the everyday controls; page 1 holds schedule settings.
         self._pages = QStackedWidget(self)
         main_page = QWidget(self._pages)
         self._pages.addWidget(main_page)
@@ -293,10 +361,6 @@ class FlexLuxApp(QWidget):
 
         self.warmth_checkbox = None
         self.warmth_slider = None
-        self.warmth_more_button = None
-        self.schedule_checkbox = None
-        self.schedule_start_edit = None
-        self.schedule_end_edit = None
         if self._gamma is not None:
             row = QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
@@ -307,19 +371,44 @@ class FlexLuxApp(QWidget):
             self.warmth_slider = QSlider(Qt.Horizontal, self)
             self.warmth_slider.setAccessibleName("Screen warmth")
             self.warmth_slider.setStyleSheet(_slider_style(_WARMTH_GROOVE))
-            self.warmth_more_button = QPushButton()
-            self.warmth_more_button.setStyleSheet(_NAV_BUTTON_STYLE)
-            self.warmth_more_button.setCursor(Qt.PointingHandCursor)
-            self.warmth_more_button.setAccessibleName("Warmth schedule")
-            self.warmth_more_button.clicked.connect(lambda: self._pages.setCurrentIndex(1))
             row.addWidget(self.warmth_checkbox)
             row.addWidget(self.warmth_slider, 1)
-            row.addWidget(self.warmth_more_button)
             layout.addLayout(row)
-            self._pages.addWidget(self._build_warmth_page())
             self._wire_warmth_controls()
 
-    def _build_warmth_page(self):
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        layout.addSpacing(4)
+        self.schedule_checkbox = PanelCheckBox("Schedule")
+        self.schedule_checkbox.setStyleSheet(_CHECKBOX_STYLE)
+        self.schedule_checkbox.setAccessibleName("Daily schedule")
+        self.schedule_status_label = QLabel()
+        self.schedule_status_label.setStyleSheet(_SMALL_LABEL_STYLE)
+        self.schedule_resume_button = self._make_nav_button("Resume", "Resume schedule")
+        self.schedule_resume_button.setToolTip("Go back to the scheduled warmth and brightness")
+        self.schedule_resume_button.clicked.connect(self._resume_schedule)
+        self.schedule_more_button = self._make_nav_button("›", "Schedule settings")
+        self.schedule_more_button.clicked.connect(lambda: self._pages.setCurrentIndex(1))
+        row.addWidget(self.schedule_checkbox)
+        row.addWidget(self.schedule_status_label, 1)
+        row.addWidget(self.schedule_resume_button)
+        row.addWidget(self.schedule_more_button)
+        layout.addLayout(row)
+        self._pages.addWidget(self._build_schedule_page())
+        self._fit_current_page()
+        self._pages.currentChanged.connect(self._on_page_changed)
+        self._wire_schedule_controls()
+
+    @staticmethod
+    def _make_nav_button(text, accessible_name):
+        button = QPushButton(text)
+        button.setStyleSheet(_NAV_BUTTON_STYLE)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setAccessibleName(accessible_name)
+        return button
+
+    def _build_schedule_page(self):
         page = QWidget(self._pages)
         layout = QVBoxLayout(page)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -327,35 +416,70 @@ class FlexLuxApp(QWidget):
 
         header = QHBoxLayout()
         header.setSpacing(2)
-        back_button = QPushButton("‹")
-        back_button.setStyleSheet(_NAV_BUTTON_STYLE)
-        back_button.setCursor(Qt.PointingHandCursor)
-        back_button.setAccessibleName("Back")
+        back_button = self._make_nav_button("‹", "Back")
         back_button.clicked.connect(lambda: self._pages.setCurrentIndex(0))
-        title = QLabel("Warmth")
+        title = QLabel("Schedule")
         title.setStyleSheet("color: #aaaaaa; font-size: 11px;")
         header.addWidget(back_button)
         header.addWidget(title)
         header.addStretch(1)
         layout.addLayout(header)
 
-        self.schedule_checkbox = PanelCheckBox("Schedule")
-        self.schedule_checkbox.setStyleSheet(_CHECKBOX_STYLE)
-        layout.addWidget(self.schedule_checkbox)
+        self.schedule_page_checkbox = PanelCheckBox("Warm and dim the screen every evening")
+        self.schedule_page_checkbox.setStyleSheet(_CHECKBOX_STYLE)
+        self.schedule_page_checkbox.setAccessibleName("Daily schedule")
+        layout.addWidget(self.schedule_page_checkbox)
 
-        times = QHBoxLayout()
-        times.setSpacing(6)
-        self.schedule_start_edit = self._make_time_edit("Warmth starts at")
-        self.schedule_end_edit = self._make_time_edit("Warmth ends at")
-        from_label = QLabel("From")
-        from_label.setStyleSheet(_SMALL_LABEL_STYLE)
-        to_label = QLabel("to")
-        to_label.setStyleSheet(_SMALL_LABEL_STYLE)
-        times.addWidget(from_label)
-        times.addWidget(self.schedule_start_edit, 1)
-        times.addWidget(to_label)
-        times.addWidget(self.schedule_end_edit, 1)
-        layout.addLayout(times)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(6)
+        self.wind_down_start_edit = self._make_time_edit("Wind down starts at")
+        self.night_start_edit = self._make_time_edit("Wind down ends at")
+        self.wake_start_edit = self._make_time_edit("Wake up starts at")
+        self.day_start_edit = self._make_time_edit("Wake up ends at")
+        for row, (text, start, end) in enumerate((
+                ("Wind down", self.wind_down_start_edit, self.night_start_edit),
+                ("Wake up", self.wake_start_edit, self.day_start_edit))):
+            label = QLabel(text)
+            label.setStyleSheet(_SMALL_LABEL_STYLE)
+            to_label = QLabel("to")
+            to_label.setStyleSheet(_SMALL_LABEL_STYLE)
+            grid.addWidget(label, row, 0)
+            grid.addWidget(start, row, 1)
+            grid.addWidget(to_label, row, 2)
+            grid.addWidget(end, row, 3)
+
+        self.night_warmth_slider = None
+        if self._gamma is not None:
+            self.night_warmth_slider = QSlider(Qt.Horizontal, self)
+            self.night_warmth_slider.setRange(0, 100)
+            self.night_warmth_slider.setAccessibleName("Night warmth")
+            self.night_warmth_slider.setStyleSheet(_slider_style(_WARMTH_GROOVE))
+            label = QLabel("Night warmth")
+            label.setStyleSheet(_SMALL_LABEL_STYLE)
+            grid.addWidget(label, 2, 0)
+            grid.addWidget(self.night_warmth_slider, 2, 1, 1, 3)
+        self.night_brightness_slider = QSlider(Qt.Horizontal, self)
+        self.night_brightness_slider.setRange(0, 100)
+        self.night_brightness_slider.setAccessibleName("Night brightness")
+        self.night_brightness_slider.setStyleSheet(_slider_style(_HW_GROOVE))
+        label = QLabel("Night brightness")
+        label.setStyleSheet(_SMALL_LABEL_STYLE)
+        grid.addWidget(label, 3, 0)
+        grid.addWidget(self.night_brightness_slider, 3, 1, 1, 3)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        layout.addLayout(grid)
+
+        self.schedule_warning_label = QLabel("Wake up must start after wind down ends.")
+        self.schedule_warning_label.setStyleSheet(_WARNING_LABEL_STYLE)
+        self.schedule_warning_label.setWordWrap(True)
+        # Keep its room so showing it never outgrows the panel's fixed height.
+        policy = self.schedule_warning_label.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self.schedule_warning_label.setSizePolicy(policy)
+        self.schedule_warning_label.hide()
+        layout.addWidget(self.schedule_warning_label)
         layout.addStretch(1)
         return page
 
@@ -450,8 +574,17 @@ class FlexLuxApp(QWidget):
         self.gamma_unlock_action = QAction("Allow Stronger Warmth...", self)
         self.gamma_unlock_action.triggered.connect(self._unlock_gamma_range)
         self.gamma_unlock_action.setVisible(False)
+        self.schedule_action = QAction("Daily Schedule", self)
+        self.schedule_action.setCheckable(True)
+        self.schedule_action.triggered.connect(self._set_schedule_enabled)
+        self.resume_schedule_action = QAction("Resume Schedule", self)
+        self.resume_schedule_action.triggered.connect(self._resume_schedule)
+        self.resume_schedule_action.setVisible(False)
         self.quit_action = QAction("Quit", self)
         self.quit_action.triggered.connect(QApplication.instance().quit)
+        self.tray_menu.addAction(self.schedule_action)
+        self.tray_menu.addAction(self.resume_schedule_action)
+        self.tray_menu.addSeparator()
         self.tray_menu.addAction(self.autostart_action)
         self.tray_menu.addAction(self.about_action)
         self.tray_menu.addAction(self.reset_action)
@@ -514,8 +647,9 @@ class FlexLuxApp(QWidget):
 
     def _poll_brightness(self):
         """Detect external brightness changes and update sliders accordingly."""
+        settling = time.monotonic() - self._schedule_moved_hw_at < self._SCHEDULE_POLL_GRACE_S
         for i, name in enumerate(self.monitor_names):
-            if not self._hw_capable[i]:
+            if not self._hw_capable[i] or settling:
                 continue
             actual = self._get_hardware_brightness(name)
             if actual is None:
@@ -535,6 +669,7 @@ class FlexLuxApp(QWidget):
             self.sliders[i].setValue(new_slider)
             self.sliders[i].blockSignals(False)
 
+            self._on_manual_brightness(i)
             self._apply_artificial_dimming(i)
 
             self._save_timer.start()
@@ -611,11 +746,19 @@ class FlexLuxApp(QWidget):
     _KEY_MIN_VALUE = 0
     _GAMMA_REAPPLY_INTERVAL_MS = 2000
     _WARMTH_DEFAULT_LEVEL = 40
-    _WARMTH_FADE_SECONDS = 180
-    _WARMTH_FADE_STEP_MS = 500
-    _SCHEDULE_CHECK_INTERVAL_MS = 30000
-    _SCHEDULE_DEFAULT_START = 21 * 60
-    _SCHEDULE_DEFAULT_END = 7 * 60
+    _SCHEDULE_CHECK_INTERVAL_MS = 15000
+    _SCHEDULE_SLEW_INTERVAL_MS = 200
+    # Per slew tick: the default night warmth (2500K) arrives in about nine
+    # seconds, and a full 100-step brightness change in ten.
+    _SCHEDULE_WARMTH_STEP = 0.008
+    _SCHEDULE_BRIGHTNESS_STEP = 2
+    # Hardware brightness lags scheduled writes, so polling ignores
+    # differences for this long after one rather than calling them manual.
+    _SCHEDULE_POLL_GRACE_S = 10
+    # Matches the Govee light: winds down 8 PM to midnight, wakes 10-11 AM.
+    _SCHEDULE_DEFAULT = DailySchedule(20 * 60, 0, 10 * 60, 11 * 60)
+    _SCHEDULE_DEFAULT_NIGHT_WARMTH = 36  # 2500K
+    _SCHEDULE_DEFAULT_NIGHT_BRIGHTNESS = 60
 
     def _snap_and_update(self, monitor_idx, value):
         if not self._hw_capable[monitor_idx] and value > 100:
@@ -624,6 +767,8 @@ class FlexLuxApp(QWidget):
         if value != 100 and abs(value - 100) <= self._SNAP_THRESHOLD:
             self.sliders[monitor_idx].setValue(100)
             return
+        if not self._driving:
+            self._on_manual_brightness(monitor_idx)
         self._on_slider_changed(monitor_idx, value)
         if self.link_checkbox and self.link_checkbox.isChecked() and not self._syncing:
             self._syncing = True
@@ -677,79 +822,71 @@ class FlexLuxApp(QWidget):
         self._update_warmth_tooltip()
         self.warmth_checkbox.toggled.connect(self._on_warmth_toggled)
         self.warmth_slider.valueChanged[int].connect(self._on_warmth_level_changed)
-        self.schedule_start_edit.setTime(self._time_from_minutes(self._SCHEDULE_DEFAULT_START))
-        self.schedule_end_edit.setTime(self._time_from_minutes(self._SCHEDULE_DEFAULT_END))
-        self._update_schedule_controls()
-        self.schedule_checkbox.toggled.connect(self._on_schedule_settings_changed)
-        self.schedule_start_edit.timeChanged.connect(self._on_schedule_settings_changed)
-        self.schedule_end_edit.timeChanged.connect(self._on_schedule_settings_changed)
 
     def _set_warmth_controls(self, enabled, level):
         """Set warmth widgets without their change handlers, then apply once."""
+        level = max(0, min(100, level))
+        self._show_warmth(enabled, level)
+        self._warmth_strength = level / 100 if enabled else 0.0
+        self._apply_warmth()
+
+    def _show_warmth(self, enabled, level):
         self.warmth_checkbox.blockSignals(True)
         self.warmth_slider.blockSignals(True)
         self.warmth_checkbox.setChecked(enabled)
-        self.warmth_slider.setValue(max(0, min(100, level)))
+        self.warmth_slider.setValue(level)
         self.warmth_checkbox.blockSignals(False)
         self.warmth_slider.blockSignals(False)
         self._update_warmth_tooltip()
-        self._fade_timer.stop()
-        self._warmth_mix = 1.0 if enabled else 0.0
-        self._apply_warmth()
 
     def _update_warmth_tooltip(self):
         kelvin = warmth_kelvin(self.warmth_slider.value() / 100)
         self.warmth_slider.setToolTip(f"Warmth  ·  {kelvin}K")
 
+    @staticmethod
+    def _show_tooltip_while_dragging(slider):
+        if slider.isSliderDown():
+            QToolTip.showText(QCursor.pos(), slider.toolTip(), slider)
+
     def _on_warmth_toggled(self, checked):
-        self._fade_timer.stop()
-        self._warmth_mix = 1.0 if checked else 0.0
+        self._on_manual_warmth()
+        self._warmth_strength = self.warmth_slider.value() / 100 if checked else 0.0
         self._apply_warmth()
         self._save_timer.start()
 
     def _on_warmth_level_changed(self, _value):
         self._update_warmth_tooltip()
-        if self.warmth_slider.isSliderDown():
-            QToolTip.showText(QCursor.pos(), self.warmth_slider.toolTip(), self.warmth_slider)
+        self._show_tooltip_while_dragging(self.warmth_slider)
         # Moving the slider means the user wants warmth on.
         if not self.warmth_checkbox.isChecked():
             self.warmth_checkbox.setChecked(True)
             return
+        self._on_manual_warmth()
+        self._warmth_strength = self.warmth_slider.value() / 100
         self._apply_warmth()
         self._save_timer.start()
 
     def _apply_warmth(self):
-        # The mix is 0 or 1 except while a scheduled change fades in or out.
-        strength = self.warmth_slider.value() / 100 * self._warmth_mix
-        if not self._gamma.set_warmth(warmth_rgb(strength)):
+        if not self._gamma.set_warmth(warmth_rgb(self._warmth_strength)):
             self._offer_gamma_unlock()
 
-    def _set_warmth_on(self, on, fade):
-        """Turn warmth on or off for the schedule, optionally fading."""
-        self.warmth_checkbox.blockSignals(True)
-        self.warmth_checkbox.setChecked(on)
-        self.warmth_checkbox.blockSignals(False)
-        target = 1.0 if on else 0.0
-        if fade:
-            self._fade_from = self._warmth_mix
-            self._fade_to = target
-            self._fade_started = time.monotonic()
-            self._fade_timer.start()
-        else:
-            self._fade_timer.stop()
-            self._warmth_mix = target
-            self._apply_warmth()
+    def _set_scheduled_warmth(self, strength):
+        # Once scheduled warmth reaches zero, the slider shows the night level
+        # so checking Warmth by hand during the day gives a useful tint.
+        level = round(strength * 100) if strength > 0 else self._night_warmth
+        self._show_warmth(strength > 0, level)
+        self._warmth_strength = strength
+        self._apply_warmth()
         self._save_timer.start()
 
-    def _fade_tick(self):
-        if self.warmth_slider is None:
-            self._fade_timer.stop()
-            return
-        progress = min(1.0, (time.monotonic() - self._fade_started) / self._WARMTH_FADE_SECONDS)
-        self._warmth_mix = self._fade_from + (self._fade_to - self._fade_from) * progress
-        self._apply_warmth()
-        if progress >= 1.0:
-            self._fade_timer.stop()
+    def _set_scheduled_brightness(self, monitor_idx, value):
+        slider = self.sliders[monitor_idx]
+        slider.blockSignals(True)
+        slider.setValue(value)
+        slider.blockSignals(False)
+        self._on_slider_changed(monitor_idx, value)
+        if self._hw_capable[monitor_idx]:
+            self._schedule_moved_hw_at = time.monotonic()
 
     @staticmethod
     def _minutes(qtime):
@@ -759,59 +896,184 @@ class FlexLuxApp(QWidget):
     def _time_from_minutes(minutes):
         return QTime(minutes // 60 % 24, minutes % 60)
 
-    def _set_schedule_controls(self, enabled, start, end):
-        """Set schedule widgets without their change handlers."""
-        widgets = (self.schedule_checkbox, self.schedule_start_edit, self.schedule_end_edit)
+    @staticmethod
+    def _now_minutes():
+        now = QTime.currentTime()
+        return now.hour() * 60 + now.minute() + now.second() / 60
+
+    def _schedule_phase(self):
+        return self._schedule.phase_and_progress(self._now_minutes())
+
+    def _schedule_time_edits(self):
+        return (self.wind_down_start_edit, self.night_start_edit, self.wake_start_edit, self.day_start_edit)
+
+    def _wire_schedule_controls(self):
+        self.schedule_checkbox.toggled.connect(self._set_schedule_enabled)
+        self.schedule_page_checkbox.toggled.connect(self._set_schedule_enabled)
+        for edit in self._schedule_time_edits():
+            edit.timeChanged.connect(self._on_schedule_times_edited)
+        if self.night_warmth_slider is not None:
+            self.night_warmth_slider.valueChanged[int].connect(self._on_night_warmth_changed)
+        self.night_brightness_slider.valueChanged[int].connect(self._on_night_brightness_changed)
+
+    def _sync_schedule_widgets(self):
+        """Show the schedule state in the panel without triggering handlers."""
+        widgets = [self.schedule_checkbox, self.schedule_page_checkbox, self.night_brightness_slider,
+                   *self._schedule_time_edits()]
+        if self.night_warmth_slider is not None:
+            widgets.append(self.night_warmth_slider)
         for widget in widgets:
             widget.blockSignals(True)
-        self.schedule_checkbox.setChecked(enabled)
-        self.schedule_start_edit.setTime(self._time_from_minutes(start))
-        self.schedule_end_edit.setTime(self._time_from_minutes(end))
+        self.schedule_checkbox.setChecked(self._schedule_enabled)
+        self.schedule_page_checkbox.setChecked(self._schedule_enabled)
+        times = (self._schedule.wind_down_start, self._schedule.night_start,
+                 self._schedule.wake_start, self._schedule.day_start)
+        for edit, minutes in zip(self._schedule_time_edits(), times):
+            edit.setTime(self._time_from_minutes(minutes))
+        if self.night_warmth_slider is not None:
+            self.night_warmth_slider.setValue(self._night_warmth)
+        self.night_brightness_slider.setValue(self._night_brightness)
         for widget in widgets:
             widget.blockSignals(False)
-        self._update_schedule_controls()
+        self.schedule_warning_label.hide()
+        self._update_night_tooltips()
+        self._update_schedule_status()
 
-    def _update_schedule_controls(self):
-        scheduled = self.schedule_checkbox.isChecked()
-        self.schedule_start_edit.setEnabled(scheduled)
-        self.schedule_end_edit.setEnabled(scheduled)
-        if scheduled:
-            locale = QLocale.system()
-            start = locale.toString(self.schedule_start_edit.time(), QLocale.ShortFormat)
-            end = locale.toString(self.schedule_end_edit.time(), QLocale.ShortFormat)
-            self.warmth_more_button.setText("Auto ›")
-            self.warmth_more_button.setToolTip(f"Warmth schedule  ·  {start}–{end}")
+    def _update_night_tooltips(self):
+        if self.night_warmth_slider is not None:
+            kelvin = warmth_kelvin(self._night_warmth / 100)
+            self.night_warmth_slider.setToolTip(f"Night warmth  ·  {kelvin}K")
+        darker = round(self._overlay_alpha_for_value(self._night_brightness) / 255 * 100)
+        self.night_brightness_slider.setToolTip(f"Night brightness  ·  {darker}% darker")
+
+    def _update_schedule_status(self):
+        if not self._schedule_enabled:
+            status = "Off"
+        elif self._schedule_paused:
+            status = "Paused"
         else:
-            self.warmth_more_button.setText("›")
-            self.warmth_more_button.setToolTip("Warmth schedule")
+            status = _PHASE_NAMES[self._schedule_phase()[0]]
+        paused = self._schedule_enabled and self._schedule_paused
+        self.schedule_status_label.setText(status)
+        self.schedule_resume_button.setVisible(paused)
+        self.schedule_action.setChecked(self._schedule_enabled)
+        self.resume_schedule_action.setVisible(paused)
+        locale = QLocale.system()
+        times = [locale.toString(self._time_from_minutes(m), QLocale.ShortFormat)
+                 for m in (self._schedule.wind_down_start, self._schedule.night_start,
+                           self._schedule.wake_start, self._schedule.day_start)]
+        self.schedule_more_button.setToolTip(
+            f"Wind down {times[0]}–{times[1]}  ·  Wake up {times[2]}–{times[3]}")
 
-    def _on_schedule_settings_changed(self, *_):
-        self._update_schedule_controls()
-        # A changed schedule takes over immediately, replacing any manual override.
-        self._schedule_was_in_window = None
-        self._check_schedule(fade=False)
+    def _set_schedule_enabled(self, enabled):
+        if enabled == self._schedule_enabled:
+            return
+        self._schedule_enabled = enabled
+        self._schedule_paused = False
+        if enabled:
+            phase, _ = self._schedule_phase()
+            for i, name in enumerate(self.monitor_names):
+                if phase == DAY or name not in self._day_brightness:
+                    self._day_brightness[name] = self.sliders[i].value()
+        else:
+            # Turning the schedule off leaves the screen as it is, so it never
+            # jumps to full brightness or neutral color at night.
+            self._slew_timer.stop()
+        log.info("Daily schedule %s", "enabled" if enabled else "disabled")
+        self._sync_schedule_widgets()
+        self._save_timer.start()
+        self._schedule_step()
+
+    def _on_schedule_times_edited(self, *_):
+        schedule = DailySchedule(*(self._minutes(edit.time()) for edit in self._schedule_time_edits()))
+        if not schedule.is_valid():
+            self.schedule_warning_label.show()
+            return
+        self.schedule_warning_label.hide()
+        self._schedule = schedule
+        self._save_timer.start()
+        self._schedule_step()
+
+    def _on_night_warmth_changed(self, value):
+        self._night_warmth = value
+        self._update_night_tooltips()
+        self._show_tooltip_while_dragging(self.night_warmth_slider)
+        self._save_timer.start()
+        self._schedule_step()
+
+    def _on_night_brightness_changed(self, value):
+        self._night_brightness = value
+        self._update_night_tooltips()
+        self._show_tooltip_while_dragging(self.night_brightness_slider)
+        self._save_timer.start()
+        self._schedule_step()
+
+    def _on_manual_brightness(self, monitor_idx):
+        """During the day a brightness change sets that monitor's daytime
+        brightness; at any other time it pauses the schedule."""
+        if not self._schedule_enabled or self._schedule_paused:
+            return
+        if self._schedule_phase()[0] == DAY:
+            self._day_brightness[self.monitor_names[monitor_idx]] = self.sliders[monitor_idx].value()
+            self._save_timer.start()
+            return
+        self._pause_schedule()
+
+    def _on_manual_warmth(self):
+        if self._schedule_enabled and not self._schedule_paused:
+            self._pause_schedule()
+
+    def _pause_schedule(self):
+        log.info("Manual change: schedule paused until resumed")
+        self._schedule_paused = True
+        self._slew_timer.stop()
+        self._update_schedule_status()
         self._save_timer.start()
 
-    def _check_schedule(self, fade):
-        """Switch warmth when the clock crosses into or out of the schedule.
+    def _resume_schedule(self):
+        if not self._schedule_paused:
+            return
+        log.info("Schedule resumed")
+        self._schedule_paused = False
+        self._save_timer.start()
+        self._schedule_step()
 
-        Warmth changes only at those crossings, so a manual toggle holds until
-        the next scheduled start or end.
+    def _schedule_step(self):
+        """Move warmth and brightness toward the schedule's values for now.
+
+        The ordinary drift of the schedule is smaller than one step and lands
+        at once. Bigger gaps (startup, resume, waking from sleep, edited
+        settings) are crossed one step per slew tick instead of jumping.
         """
-        if self.warmth_slider is None or not self.schedule_checkbox.isChecked():
+        if not self._schedule_enabled or self._schedule_paused:
+            self._slew_timer.stop()
+            self._update_schedule_status()
             return
-        now = self._minutes(QTime.currentTime())
-        start = self._minutes(self.schedule_start_edit.time())
-        end = self._minutes(self.schedule_end_edit.time())
-        if start <= end:
-            in_window = start <= now < end
-        else:
-            in_window = now >= start or now < end
-        if in_window == self._schedule_was_in_window:
-            return
-        self._schedule_was_in_window = in_window
-        if in_window != self.warmth_checkbox.isChecked():
-            self._set_warmth_on(in_window, fade)
+        _, progress = self._schedule_phase()
+        settled = True
+        self._driving = True
+        try:
+            if self.warmth_slider is not None:
+                target = scheduled_warmth(progress, self._night_warmth) / 100
+                strength = step_toward(self._warmth_strength, target, self._SCHEDULE_WARMTH_STEP)
+                if strength != self._warmth_strength:
+                    self._set_scheduled_warmth(strength)
+                settled = settled and strength == target
+            for i, name in enumerate(self.monitor_names):
+                target = round(scheduled_brightness(progress, self._day_brightness[name],
+                                                    self._night_brightness))
+                current = self.sliders[i].value()
+                value = step_toward(current, target, self._SCHEDULE_BRIGHTNESS_STEP)
+                if value != current:
+                    self._set_scheduled_brightness(i, value)
+                settled = settled and value == target
+        finally:
+            self._driving = False
+        if settled:
+            self._slew_timer.stop()
+        elif not self._slew_timer.isActive():
+            self._slew_timer.start()
+        self._update_schedule_status()
 
     def _offer_gamma_unlock(self):
         """Once per run, point the user at lifting the OS gamma limit."""
@@ -884,14 +1146,20 @@ class FlexLuxApp(QWidget):
             return
         self.settings.clear()
         self.settings.sync()
+        self._slew_timer.stop()
+        self._schedule_enabled = False
+        self._schedule_paused = False
+        self._schedule = self._SCHEDULE_DEFAULT
+        self._night_warmth = self._SCHEDULE_DEFAULT_NIGHT_WARMTH
+        self._night_brightness = self._SCHEDULE_DEFAULT_NIGHT_BRIGHTNESS
+        self._day_brightness = {}
         for i, slider in enumerate(self.sliders):
             slider.setValue(100)
         if self.link_checkbox:
             self.link_checkbox.setChecked(True)
         if self.warmth_slider is not None:
             self._set_warmth_controls(False, self._WARMTH_DEFAULT_LEVEL)
-            self._set_schedule_controls(False, self._SCHEDULE_DEFAULT_START, self._SCHEDULE_DEFAULT_END)
-            self._schedule_was_in_window = None
+        self._sync_schedule_widgets()
         self._pages.setCurrentIndex(0)
         self.adjust_window_size()
 
@@ -950,6 +1218,9 @@ class FlexLuxApp(QWidget):
         self._last_hide_time = time.monotonic()
         self._set_poll_speed(fast=False)
         self._pages.setCurrentIndex(0)
+        # Discard schedule times left out of order; the saved ones still apply.
+        if not self.schedule_warning_label.isHidden():
+            self._sync_schedule_widgets()
         super().hideEvent(event)
 
     def check_focus_and_hide(self):
@@ -982,7 +1253,7 @@ class FlexLuxApp(QWidget):
             self._gamma_timer.stop()
         if hasattr(self, '_schedule_timer'):
             self._schedule_timer.stop()
-        self._fade_timer.stop()
+        self._slew_timer.stop()
         if self._gamma is not None:
             self._gamma.restore()
         if hasattr(self, '_backend') and self._backend:

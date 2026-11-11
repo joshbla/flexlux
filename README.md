@@ -121,7 +121,19 @@ On macOS, displays that are mirroring each other are darkened through each displ
 
 The **Warmth** checkbox and slider below the brightness controls tint every display toward orange, from neutral (6500K) at the left to 1200K at the right; about a third of the way along matches macOS Night Shift's warmest setting. Moving the slider turns warmth on; the checkbox turns it off without losing the level. Warmth works on displays that Night Shift skips, such as TVs.
 
-The arrow at the end of the warmth row opens the warmth page, where **Schedule** turns warmth on and off at fixed times from the system clock. Scheduled changes fade in and out over a few minutes, and the arrow reads **Auto** while a schedule is set. Turning warmth on or off by hand holds until the next scheduled start or end; editing the schedule applies it right away.
+### Daily schedule
+
+The **Schedule** checkbox below Warmth (also **Daily Schedule** in the tray menu) gradually warms and dims every screen in the evening and brings it back in the morning, following the system clock. The row shows the current phase: Day, Winding down, Night, or Waking up. By default it matches a room light on the same routine:
+
+- **Wind down**, 8 PM to midnight: warmth rises from neutral to the night warmth and brightness falls from each monitor's daytime setting to the night brightness, both steadily.
+- **Night**, midnight to 10 AM: holds the night settings.
+- **Wake up**, 10 to 11 AM: eases back to neutral and daytime brightness.
+
+The arrow at the end of the row opens the schedule page, where the four times, the night warmth (2500K by default), and the night brightness can be changed. Wake up has to start after wind down ends; times out of order are not applied. Scheduled dimming uses the same range as the brightness slider, so on a monitor with hardware control the backlight dims first and the darkening overlay takes over below it. A monitor already set darker than the night brightness is left alone.
+
+Moving a brightness slider during the day sets that monitor's daytime brightness. Any other change by hand, including warmth at any time and brightness outside the day, pauses the schedule until **Resume** is clicked (on the schedule row or in the tray menu); the pause survives restarts. Starting FlexLux, resuming, and waking the computer from sleep go straight toward the current scheduled state, crossing large differences over about ten seconds instead of jumping. Turning the schedule off leaves the screen as it is.
+
+### Gamma notes
 
 Warmth and mirrored-display dimming write each display's gamma ramp. Other apps that also write it, such as f.lux, fight with FlexLux and cause flicker; quit them while using these features. FlexLux puts the original ramps back when it quits.
 

@@ -2,6 +2,9 @@
 
 ## Verification
 
+- Verify the daily schedule on macOS: warmth and dimming follow the schedule, Resume works, and the built-in display dims its backlight before the overlay. Checked only on Windows (automated tests plus the running build).
+- macOS: evening auto-brightness changes the built-in display's backlight, which the brightness poll treats as a manual change and so silently pauses the daily schedule. Distinguish OS-driven changes from the user's (for example, only pause on brightness keys or panel input) so auto-brightness does not pause it.
+
 - Verify the shared black panel on real Windows and Linux: it matches macOS, sits above the taskbar on the screen under the cursor (Linux now uses the same work-area placement as Windows, which should fix stacked secondary screens), and the warmth page's time fields accept typing. Checked only on macOS.
 - Verify warmth on real Windows hardware: the slider tints every display, the default gamma limit triggers the "Allow Stronger Warmth" offer, the elevated registry change works after sign-in, and quitting restores neutral color. Untested; written on macOS.
 - Verify warmth on Linux X11 (XRandR gamma): tint applies per CRTC, quitting restores, and the panel hides warmth under Wayland. Untested.
