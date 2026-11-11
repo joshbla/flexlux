@@ -1,5 +1,6 @@
 import logging
 import time
+from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QWidget, QSlider, QVBoxLayout, QHBoxLayout, QSystemTrayIcon, QMenu,
                              QAction, QLabel, QMessageBox, QToolTip, QStackedWidget, QPushButton,
                              QTimeEdit, QAbstractSpinBox, QGridLayout)
@@ -12,7 +13,7 @@ from flexlux.gamma import get_gamma_controller, warmth_rgb, warmth_kelvin
 from flexlux.overlay import OverlayWindow
 from flexlux.platform_ui import get_ui_config
 from flexlux.schedule import (DailySchedule, DAY, WIND_DOWN, NIGHT, WAKE_UP, scheduled_warmth,
-                              scheduled_brightness, step_toward)
+                              scheduled_brightness, step_toward, next_time_of_day)
 from flexlux.utils import resource_path
 from flexlux.widgets import PanelCheckBox
 from flexlux import autostart
@@ -93,6 +94,7 @@ class FlexLuxApp(QWidget):
         self._schedule = self._SCHEDULE_DEFAULT
         self._schedule_enabled = False
         self._schedule_paused = False
+        self._paused_until = None
         self._night_warmth = self._SCHEDULE_DEFAULT_NIGHT_WARMTH
         self._night_brightness = self._SCHEDULE_DEFAULT_NIGHT_BRIGHTNESS
         self._day_brightness = {}
@@ -247,7 +249,6 @@ class FlexLuxApp(QWidget):
                 s.remove(key)
             log.info("Moved the warmth schedule setting to the daily schedule")
         self._schedule_enabled = s.value("schedule/enabled", False, type=bool)
-        self._schedule_paused = s.value("schedule/paused", False, type=bool)
         default = self._SCHEDULE_DEFAULT
         schedule = DailySchedule(
             s.value("schedule/wind_down_start", default.wind_down_start, type=int),
@@ -259,6 +260,12 @@ class FlexLuxApp(QWidget):
         else:
             log.warning("Ignoring saved schedule with times out of order: %s", schedule)
             self._schedule = default
+        self._schedule_paused = s.value("schedule/paused", False, type=bool)
+        if self._schedule_paused and s.contains("schedule/paused_until"):
+            self._paused_until = datetime.fromisoformat(s.value("schedule/paused_until", type=str))
+        elif self._schedule_paused:
+            # Paused by v1.9.0 or v1.9.1, which recorded no end.
+            self._paused_until = next_time_of_day(self._now_datetime(), self._schedule.wake_start)
         self._night_warmth = max(0, min(100, s.value(
             "schedule/night_warmth", self._SCHEDULE_DEFAULT_NIGHT_WARMTH, type=int)))
         # v1.9.0 saved its default night brightness here before anyone could
@@ -271,11 +278,11 @@ class FlexLuxApp(QWidget):
             key = f"schedule/day_brightness/{name}"
             if s.contains(key):
                 upper = 200 if self._hw_capable[i] else 100
-                self._day_brightness[name] = max(0, min(upper, s.value(key, type=int)))
+                self._day_brightness[name] = max(100, min(upper, s.value(key, type=int)))
             else:
                 # A monitor the schedule has not seen yet keeps its current
-                # setting as its daytime brightness.
-                self._day_brightness[name] = self.sliders[i].value()
+                # setting as its daytime brightness, minus any darkening.
+                self._day_brightness[name] = max(100, self.sliders[i].value())
 
     def _save_settings(self):
         for i, name in enumerate(self.monitor_names):
@@ -287,6 +294,10 @@ class FlexLuxApp(QWidget):
             self.settings.setValue("warmth/level", self.warmth_slider.value())
         self.settings.setValue("schedule/enabled", self._schedule_enabled)
         self.settings.setValue("schedule/paused", self._schedule_paused)
+        if self._schedule_paused:
+            self.settings.setValue("schedule/paused_until", self._paused_until.isoformat())
+        else:
+            self.settings.remove("schedule/paused_until")
         self.settings.setValue("schedule/wind_down_start", self._schedule.wind_down_start)
         self.settings.setValue("schedule/night_start", self._schedule.night_start)
         self.settings.setValue("schedule/wake_start", self._schedule.wake_start)
@@ -910,6 +921,10 @@ class FlexLuxApp(QWidget):
         return QTime(minutes // 60 % 24, minutes % 60)
 
     @staticmethod
+    def _now_datetime():
+        return datetime.now()
+
+    @staticmethod
     def _now_minutes():
         now = QTime.currentTime()
         return now.hour() * 60 + now.minute() + now.second() / 60
@@ -989,7 +1004,7 @@ class FlexLuxApp(QWidget):
             phase, _ = self._schedule_phase()
             for i, name in enumerate(self.monitor_names):
                 if phase == DAY or name not in self._day_brightness:
-                    self._day_brightness[name] = self.sliders[i].value()
+                    self._day_brightness[name] = max(100, self.sliders[i].value())
         else:
             # Turning the schedule off leaves the screen as it is, so it never
             # jumps to full brightness or neutral color at night.
@@ -1028,8 +1043,11 @@ class FlexLuxApp(QWidget):
         brightness; at any other time it pauses the schedule."""
         if not self._schedule_enabled or self._schedule_paused:
             return
-        if self._schedule_phase()[0] == DAY:
-            self._day_brightness[self.monitor_names[monitor_idx]] = self.sliders[monitor_idx].value()
+        value = self.sliders[monitor_idx].value()
+        # Daytime levels never darken through the overlay; that is a manual
+        # override like any change outside the day.
+        if self._schedule_phase()[0] == DAY and value >= 100:
+            self._day_brightness[self.monitor_names[monitor_idx]] = value
             self._save_timer.start()
             return
         self._pause_schedule()
@@ -1039,7 +1057,10 @@ class FlexLuxApp(QWidget):
             self._pause_schedule()
 
     def _pause_schedule(self):
-        log.info("Manual change: schedule paused until resumed")
+        # A pause lasts until Resume or the next wake-up, so a change made one
+        # evening never carries darkening or warmth into the next day.
+        self._paused_until = next_time_of_day(self._now_datetime(), self._schedule.wake_start)
+        log.info("Manual change: schedule paused until resumed or %s", self._paused_until)
         self._schedule_paused = True
         self._slew_timer.stop()
         self._update_schedule_status()
@@ -1060,6 +1081,10 @@ class FlexLuxApp(QWidget):
         at once. Bigger gaps (startup, resume, waking from sleep, edited
         settings) are crossed one step per slew tick instead of jumping.
         """
+        if self._schedule_paused and self._now_datetime() >= self._paused_until:
+            log.info("Wake-up reached: schedule resumed")
+            self._schedule_paused = False
+            self._save_timer.start()
         if not self._schedule_enabled or self._schedule_paused:
             self._slew_timer.stop()
             self._update_schedule_status()

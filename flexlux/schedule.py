@@ -7,6 +7,7 @@ minutes after local midnight.
 """
 
 from dataclasses import dataclass
+from datetime import timedelta
 
 MINUTES_PER_DAY = 24 * 60
 
@@ -56,6 +57,14 @@ class DailySchedule:
         return DAY, 0.0
 
 
+def next_time_of_day(after, minute):
+    """The first local datetime strictly after `after` at a minute of the day."""
+    candidate = after.replace(hour=minute // 60, minute=minute % 60, second=0, microsecond=0)
+    if candidate <= after:
+        candidate += timedelta(days=1)
+    return candidate
+
+
 def scheduled_warmth(progress, night_level):
     """Warmth slider level (0-100, unrounded) at a night progress."""
     return night_level * progress
@@ -64,10 +73,12 @@ def scheduled_warmth(progress, night_level):
 def scheduled_brightness(progress, day_value, night_value):
     """Brightness slider value (0-200, unrounded) at a night progress.
 
-    Moves from the monitor's daytime value toward the night value. A monitor
-    already set darker than the night value in the day is left alone, so the
-    schedule only ever dims.
+    Moves from the monitor's daytime value toward the night value. The
+    daytime value never uses the darkening overlay (below 100), so the day
+    always ends it; with a night value of 100 the schedule leaves brightness
+    alone.
     """
+    day_value = max(100, day_value)
     if day_value <= night_value:
         return float(day_value)
     return day_value + (night_value - day_value) * progress
