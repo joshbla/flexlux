@@ -65,6 +65,9 @@ _TIME_EDIT_STYLE = """
     QTimeEdit:disabled { color: #444444; border-color: #222222; }
 """
 _SMALL_LABEL_STYLE = "color: #666666; font-size: 10px;"
+_VALUE_LABEL_STYLE = "color: #aaaaaa; font-size: 10px;"
+# Dark at the left like the Artificial half of the brightness slider it mirrors.
+_NIGHT_BRIGHTNESS_GROOVE = "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #262626, stop:1 darkgray);"
 _WARNING_LABEL_STYLE = "color: #c08040; font-size: 10px;"
 _PHASE_NAMES = {DAY: "Day", WIND_DOWN: "Winding down", NIGHT: "Night", WAKE_UP: "Waking up"}
 
@@ -258,8 +261,11 @@ class FlexLuxApp(QWidget):
             self._schedule = default
         self._night_warmth = max(0, min(100, s.value(
             "schedule/night_warmth", self._SCHEDULE_DEFAULT_NIGHT_WARMTH, type=int)))
+        # v1.9.0 saved its default night brightness here before anyone could
+        # pick it; the new default replaces it under a new key.
+        s.remove("schedule/night_brightness")
         self._night_brightness = max(0, min(100, s.value(
-            "schedule/night_brightness", self._SCHEDULE_DEFAULT_NIGHT_BRIGHTNESS, type=int)))
+            "schedule/night_dimming", self._SCHEDULE_DEFAULT_NIGHT_BRIGHTNESS, type=int)))
         self._day_brightness = {}
         for i, name in enumerate(self.monitor_names):
             key = f"schedule/day_brightness/{name}"
@@ -286,7 +292,7 @@ class FlexLuxApp(QWidget):
         self.settings.setValue("schedule/wake_start", self._schedule.wake_start)
         self.settings.setValue("schedule/day_start", self._schedule.day_start)
         self.settings.setValue("schedule/night_warmth", self._night_warmth)
-        self.settings.setValue("schedule/night_brightness", self._night_brightness)
+        self.settings.setValue("schedule/night_dimming", self._night_brightness)
         for name, value in self._day_brightness.items():
             self.settings.setValue(f"schedule/day_brightness/{name}", value)
         self.settings.sync()
@@ -298,7 +304,10 @@ class FlexLuxApp(QWidget):
 
     def _fit_current_page(self):
         """Size the stack to the visible page; it otherwise takes the tallest one."""
-        self._pages.setFixedHeight(self._pages.currentWidget().sizeHint().height())
+        page = self._pages.currentWidget()
+        # Unpolished labels have not taken their stylesheet fonts yet.
+        page.ensurePolished()
+        self._pages.setFixedHeight(page.sizeHint().height())
 
     def _on_page_changed(self, _index):
         self._fit_current_page()
@@ -408,6 +417,22 @@ class FlexLuxApp(QWidget):
         button.setAccessibleName(accessible_name)
         return button
 
+    def _add_night_slider(self, grid, row, title, groove):
+        """A titled slider with its current value shown above its right end."""
+        label = QLabel(title)
+        label.setStyleSheet(_SMALL_LABEL_STYLE)
+        value_label = QLabel()
+        value_label.setStyleSheet(_VALUE_LABEL_STYLE)
+        value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        slider = QSlider(Qt.Horizontal, self)
+        slider.setRange(0, 100)
+        slider.setAccessibleName(title)
+        slider.setStyleSheet(_slider_style(groove))
+        grid.addWidget(label, row, 0, 1, 2)
+        grid.addWidget(value_label, row, 2, 1, 2)
+        grid.addWidget(slider, row + 1, 0, 1, 4)
+        return slider, value_label
+
     def _build_schedule_page(self):
         page = QWidget(self._pages)
         layout = QVBoxLayout(page)
@@ -450,30 +475,18 @@ class FlexLuxApp(QWidget):
             grid.addWidget(end, row, 3)
 
         self.night_warmth_slider = None
+        self.night_warmth_value_label = None
         if self._gamma is not None:
-            self.night_warmth_slider = QSlider(Qt.Horizontal, self)
-            self.night_warmth_slider.setRange(0, 100)
-            self.night_warmth_slider.setAccessibleName("Night warmth")
-            self.night_warmth_slider.setStyleSheet(_slider_style(_WARMTH_GROOVE))
-            label = QLabel("Night warmth")
-            label.setStyleSheet(_SMALL_LABEL_STYLE)
-            grid.addWidget(label, 2, 0)
-            grid.addWidget(self.night_warmth_slider, 2, 1, 1, 3)
-        self.night_brightness_slider = QSlider(Qt.Horizontal, self)
-        self.night_brightness_slider.setRange(0, 100)
-        self.night_brightness_slider.setAccessibleName("Night brightness")
-        self.night_brightness_slider.setStyleSheet(_slider_style(_HW_GROOVE))
-        label = QLabel("Night brightness")
-        label.setStyleSheet(_SMALL_LABEL_STYLE)
-        grid.addWidget(label, 3, 0)
-        grid.addWidget(self.night_brightness_slider, 3, 1, 1, 3)
+            self.night_warmth_slider, self.night_warmth_value_label = self._add_night_slider(
+                grid, 2, "Night warmth", _WARMTH_GROOVE)
+        self.night_brightness_slider, self.night_brightness_value_label = self._add_night_slider(
+            grid, 4, "Night dimming", _NIGHT_BRIGHTNESS_GROOVE)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
         layout.addLayout(grid)
 
         self.schedule_warning_label = QLabel("Wake up must start after wind down ends.")
         self.schedule_warning_label.setStyleSheet(_WARNING_LABEL_STYLE)
-        self.schedule_warning_label.setWordWrap(True)
         # Keep its room so showing it never outgrows the panel's fixed height.
         policy = self.schedule_warning_label.sizePolicy()
         policy.setRetainSizeWhenHidden(True)
@@ -758,7 +771,7 @@ class FlexLuxApp(QWidget):
     # Matches the Govee light: winds down 8 PM to midnight, wakes 10-11 AM.
     _SCHEDULE_DEFAULT = DailySchedule(20 * 60, 0, 10 * 60, 11 * 60)
     _SCHEDULE_DEFAULT_NIGHT_WARMTH = 36  # 2500K
-    _SCHEDULE_DEFAULT_NIGHT_BRIGHTNESS = 60
+    _SCHEDULE_DEFAULT_NIGHT_BRIGHTNESS = 50  # 45% darker
 
     def _snap_and_update(self, monitor_idx, value):
         if not self._hw_capable[monitor_idx] and value > 100:
@@ -936,15 +949,17 @@ class FlexLuxApp(QWidget):
         for widget in widgets:
             widget.blockSignals(False)
         self.schedule_warning_label.hide()
-        self._update_night_tooltips()
+        self._update_night_labels()
         self._update_schedule_status()
 
-    def _update_night_tooltips(self):
+    def _update_night_labels(self):
         if self.night_warmth_slider is not None:
             kelvin = warmth_kelvin(self._night_warmth / 100)
-            self.night_warmth_slider.setToolTip(f"Night warmth  ·  {kelvin}K")
+            self.night_warmth_value_label.setText(f"{kelvin}K")
+            self.night_warmth_slider.setToolTip("Left: neutral  ·  Right: warmest")
         darker = round(self._overlay_alpha_for_value(self._night_brightness) / 255 * 100)
-        self.night_brightness_slider.setToolTip(f"Night brightness  ·  {darker}% darker")
+        self.night_brightness_value_label.setText(f"{darker}% darker" if darker else "Not dimmed")
+        self.night_brightness_slider.setToolTip("Left: darkest  ·  Right: not dimmed")
 
     def _update_schedule_status(self):
         if not self._schedule_enabled:
@@ -996,14 +1011,14 @@ class FlexLuxApp(QWidget):
 
     def _on_night_warmth_changed(self, value):
         self._night_warmth = value
-        self._update_night_tooltips()
+        self._update_night_labels()
         self._show_tooltip_while_dragging(self.night_warmth_slider)
         self._save_timer.start()
         self._schedule_step()
 
     def _on_night_brightness_changed(self, value):
         self._night_brightness = value
-        self._update_night_tooltips()
+        self._update_night_labels()
         self._show_tooltip_while_dragging(self.night_brightness_slider)
         self._save_timer.start()
         self._schedule_step()

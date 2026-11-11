@@ -125,11 +125,11 @@ The **Warmth** checkbox and slider below the brightness controls tint every disp
 
 The **Schedule** checkbox below Warmth (also **Daily Schedule** in the tray menu) gradually warms and dims every screen in the evening and brings it back in the morning, following the system clock. The row shows the current phase: Day, Winding down, Night, or Waking up. By default it matches a room light on the same routine:
 
-- **Wind down**, 8 PM to midnight: warmth rises from neutral to the night warmth and brightness falls from each monitor's daytime setting to the night brightness, both steadily.
+- **Wind down**, 8 PM to midnight: warmth rises from neutral to the night warmth and brightness falls from each monitor's daytime setting to the night dimming level, both steadily.
 - **Night**, midnight to 10 AM: holds the night settings.
 - **Wake up**, 10 to 11 AM: eases back to neutral and daytime brightness.
 
-The arrow at the end of the row opens the schedule page, where the four times, the night warmth (2500K by default), and the night brightness can be changed. Wake up has to start after wind down ends; times out of order are not applied. Scheduled dimming uses the same range as the brightness slider, so on a monitor with hardware control the backlight dims first and the darkening overlay takes over below it. A monitor already set darker than the night brightness is left alone.
+The arrow at the end of the row opens the schedule page, where the four times, the night warmth (2500K by default), and the night dimming (45% darker by default) can be changed; each shows its current value. Night dimming matches the Artificial half of the brightness slider: the left end is darkest. Wake up has to start after wind down ends; times out of order are not applied. Scheduled dimming uses the same range as the brightness slider, so on a monitor with hardware control the backlight dims first and the darkening overlay takes over below it. A monitor already set darker than the night dimming level is left alone.
 
 Moving a brightness slider during the day sets that monitor's daytime brightness. Any other change by hand, including warmth at any time and brightness outside the day, pauses the schedule until **Resume** is clicked (on the schedule row or in the tray menu); the pause survives restarts. Starting FlexLux, resuming, and waking the computer from sleep go straight toward the current scheduled state, crossing large differences over about ten seconds instead of jumping. Turning the schedule off leaves the screen as it is.
 
