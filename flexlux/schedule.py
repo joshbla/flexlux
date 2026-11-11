@@ -65,6 +65,18 @@ def next_time_of_day(after, minute):
     return candidate
 
 
+def dimming_progress(phase, progress):
+    """How far into night dimming is, given the phase and night progress.
+
+    Wind-down dims quickly at first and levels off toward night, which tracks
+    a room light dimming in a straight line more closely than a straight line
+    on the screen does. Wake-up stays linear.
+    """
+    if phase == WIND_DOWN:
+        return 1.0 - (1.0 - progress) ** 2
+    return progress
+
+
 def scheduled_warmth(progress, night_level):
     """Warmth slider level (0-100, unrounded) at a night progress."""
     return night_level * progress

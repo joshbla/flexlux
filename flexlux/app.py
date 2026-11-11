@@ -13,7 +13,7 @@ from flexlux.gamma import get_gamma_controller, warmth_rgb, warmth_kelvin
 from flexlux.overlay import OverlayWindow
 from flexlux.platform_ui import get_ui_config
 from flexlux.schedule import (DailySchedule, DAY, WIND_DOWN, NIGHT, WAKE_UP, scheduled_warmth,
-                              scheduled_brightness, step_toward, next_time_of_day)
+                              scheduled_brightness, step_toward, next_time_of_day, dimming_progress)
 from flexlux.utils import resource_path
 from flexlux.widgets import PanelCheckBox
 from flexlux import autostart
@@ -95,6 +95,10 @@ class FlexLuxApp(QWidget):
         self._schedule_enabled = False
         self._schedule_paused = False
         self._paused_until = None
+        # Monitor name -> brightness darkened by hand during the day, held
+        # until _held_until (the next day start).
+        self._held_darkening = {}
+        self._held_until = None
         self._night_warmth = self._SCHEDULE_DEFAULT_NIGHT_WARMTH
         self._night_brightness = self._SCHEDULE_DEFAULT_NIGHT_BRIGHTNESS
         self._day_brightness = {}
@@ -273,6 +277,13 @@ class FlexLuxApp(QWidget):
         s.remove("schedule/night_brightness")
         self._night_brightness = max(0, min(100, s.value(
             "schedule/night_dimming", self._SCHEDULE_DEFAULT_NIGHT_BRIGHTNESS, type=int)))
+        self._held_darkening = {}
+        if s.contains("schedule/held_until"):
+            self._held_until = datetime.fromisoformat(s.value("schedule/held_until", type=str))
+            for name in self.monitor_names:
+                key = f"schedule/held_darkening/{name}"
+                if s.contains(key):
+                    self._held_darkening[name] = max(0, min(100, s.value(key, type=int)))
         self._day_brightness = {}
         for i, name in enumerate(self.monitor_names):
             key = f"schedule/day_brightness/{name}"
@@ -298,6 +309,13 @@ class FlexLuxApp(QWidget):
             self.settings.setValue("schedule/paused_until", self._paused_until.isoformat())
         else:
             self.settings.remove("schedule/paused_until")
+        self.settings.remove("schedule/held_darkening")
+        if self._held_darkening:
+            self.settings.setValue("schedule/held_until", self._held_until.isoformat())
+            for name, value in self._held_darkening.items():
+                self.settings.setValue(f"schedule/held_darkening/{name}", value)
+        else:
+            self.settings.remove("schedule/held_until")
         self.settings.setValue("schedule/wind_down_start", self._schedule.wind_down_start)
         self.settings.setValue("schedule/night_start", self._schedule.night_start)
         self.settings.setValue("schedule/wake_start", self._schedule.wake_start)
@@ -1040,17 +1058,25 @@ class FlexLuxApp(QWidget):
 
     def _on_manual_brightness(self, monitor_idx):
         """During the day a brightness change sets that monitor's daytime
-        brightness; at any other time it pauses the schedule."""
+        brightness, or holds its darkening until the next day starts; at any
+        other time it pauses the schedule."""
         if not self._schedule_enabled or self._schedule_paused:
             return
-        value = self.sliders[monitor_idx].value()
-        # Daytime levels never darken through the overlay; that is a manual
-        # override like any change outside the day.
-        if self._schedule_phase()[0] == DAY and value >= 100:
-            self._day_brightness[self.monitor_names[monitor_idx]] = value
-            self._save_timer.start()
+        if self._schedule_phase()[0] != DAY:
+            self._pause_schedule()
             return
-        self._pause_schedule()
+        name = self.monitor_names[monitor_idx]
+        value = self.sliders[monitor_idx].value()
+        if value >= 100:
+            self._day_brightness[name] = value
+            self._held_darkening.pop(name, None)
+        else:
+            # Darkening by hand (a dark room) holds through the evening: the
+            # schedule dims further only once it would be darker, and the
+            # next day ends it.
+            self._held_darkening[name] = value
+            self._held_until = next_time_of_day(self._now_datetime(), self._schedule.day_start)
+        self._save_timer.start()
 
     def _on_manual_warmth(self):
         if self._schedule_enabled and not self._schedule_paused:
@@ -1089,7 +1115,11 @@ class FlexLuxApp(QWidget):
             self._slew_timer.stop()
             self._update_schedule_status()
             return
-        _, progress = self._schedule_phase()
+        if self._held_darkening and self._now_datetime() >= self._held_until:
+            log.info("Day reached: held darkening ended")
+            self._held_darkening = {}
+            self._save_timer.start()
+        phase, progress = self._schedule_phase()
         settled = True
         self._driving = True
         try:
@@ -1100,8 +1130,18 @@ class FlexLuxApp(QWidget):
                     self._set_scheduled_warmth(strength)
                 settled = settled and strength == target
             for i, name in enumerate(self.monitor_names):
-                target = round(scheduled_brightness(progress, self._day_brightness[name],
-                                                    self._night_brightness))
+                day = self._day_brightness[name]
+                held = self._held_darkening.get(name)
+                if held is None:
+                    target = scheduled_brightness(dimming_progress(phase, progress), day,
+                                                  self._night_brightness)
+                elif phase == WAKE_UP:
+                    # Wake up brightens from wherever the night left off.
+                    target = scheduled_brightness(progress, day, min(held, self._night_brightness))
+                else:
+                    target = min(held, scheduled_brightness(dimming_progress(phase, progress), day,
+                                                            self._night_brightness))
+                target = round(target)
                 current = self.sliders[i].value()
                 value = step_toward(current, target, self._SCHEDULE_BRIGHTNESS_STEP)
                 if value != current:
@@ -1193,6 +1233,7 @@ class FlexLuxApp(QWidget):
         self._night_warmth = self._SCHEDULE_DEFAULT_NIGHT_WARMTH
         self._night_brightness = self._SCHEDULE_DEFAULT_NIGHT_BRIGHTNESS
         self._day_brightness = {}
+        self._held_darkening = {}
         for i, slider in enumerate(self.sliders):
             slider.setValue(100)
         if self.link_checkbox:
