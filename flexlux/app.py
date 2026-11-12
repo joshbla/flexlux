@@ -121,8 +121,26 @@ class FlexLuxApp(QWidget):
         self._refresh_timer = QTimer()
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(1000)
-        self._refresh_timer.timeout.connect(self._refresh_monitors)
-        QApplication.desktop().screenCountChanged.connect(lambda _: self._refresh_timer.start())
+        self._refresh_timer.timeout.connect(lambda: self._refresh_monitors("Screen configuration changed"))
+        # Swapping one screen for another (closing the laptop lid while docked,
+        # waking from sleep) can keep the screen count the same, so watch the
+        # screens themselves rather than how many there are.
+        app = QApplication.instance()
+        app.screenAdded.connect(lambda _: self._on_screens_changed())
+        app.screenRemoved.connect(lambda _: self._on_screens_changed())
+        self._screen_check_timer = QTimer()
+        self._screen_check_timer.setInterval(self._SCREEN_CHECK_INTERVAL_MS)
+        self._screen_check_timer.timeout.connect(self._check_screens)
+        self._screen_check_timer.start()
+        # Retries detection while a monitor's hardware control does not answer
+        # yet, as when it is still waking up at login.
+        self._redetect_attempts = 0
+        self._redetect_timer = QTimer()
+        self._redetect_timer.setSingleShot(True)
+        self._redetect_timer.setInterval(self._REDETECT_RETRY_MS)
+        self._redetect_timer.timeout.connect(self._retry_detection)
+        self._last_redetect_at = 0.0
+        self._schedule_redetect_retry()
         self._poll_timer = QTimer()
         self._poll_timer.setInterval(self._POLL_INTERVAL_MS)
         self._poll_timer.timeout.connect(self._poll_brightness)
@@ -150,6 +168,12 @@ class FlexLuxApp(QWidget):
         QApplication.instance().aboutToQuit.connect(self._shutdown)
 
     def _detect_monitors(self):
+        self._screens = self._screen_signature()
+        # Monitor name -> last hardware brightness read, and (brightness
+        # before, time) when a run of FlexLux writes began, so polling can tell
+        # a write that never took effect from a change made on the monitor.
+        self._hw_read = {}
+        self._hw_write_check = {}
         self._backend = None
         try:
             self._backend = get_backend()
@@ -543,8 +567,54 @@ class FlexLuxApp(QWidget):
             elif item.layout():
                 self._clear_layout(item.layout())
 
-    def _refresh_monitors(self):
-        log.info("Screen configuration changed, refreshing monitors")
+    @staticmethod
+    def _screen_signature():
+        return tuple((s.name(), s.geometry().getRect()) for s in QApplication.screens())
+
+    def _on_screens_changed(self):
+        self._redetect_attempts = 0
+        self._refresh_timer.start()
+
+    def _check_screens(self):
+        if self._screens != self._screen_signature() and not self._refresh_timer.isActive():
+            self._on_screens_changed()
+
+    def _schedule_redetect_retry(self):
+        failed = [n for n in self.monitor_names
+                  if self._backend and self._backend.hardware_probe_failed(n)]
+        if failed and self._redetect_attempts < self._REDETECT_MAX_ATTEMPTS:
+            self._redetect_timer.start()
+        else:
+            self._redetect_timer.stop()
+
+    def _retry_detection(self):
+        # Rebuilding the panel under the user's pointer would drop a drag.
+        if self.isVisible():
+            self._redetect_timer.start()
+            return
+        self._redetect_attempts += 1
+        self._refresh_monitors(f"Retrying hardware brightness detection "
+                               f"({self._redetect_attempts}/{self._REDETECT_MAX_ATTEMPTS})")
+
+    def _redetect_after_failed_write(self, monitor_idx):
+        """Detect monitors again, at most once per cooldown. Returns False
+        during the cooldown so the caller treats the reading as an ordinary
+        external change."""
+        now = time.monotonic()
+        if now - self._last_redetect_at < self._FAILED_WRITE_REDETECT_COOLDOWN_S:
+            return False
+        if any(s.isSliderDown() for s in self.sliders):
+            # Polling sees the same mismatch again once the drag ends.
+            return True
+        self._last_redetect_at = now
+        self._redetect_attempts = 0
+        name = self.monitor_names[monitor_idx]
+        QTimer.singleShot(0, lambda: self._refresh_monitors(
+            f"Brightness change on {name} did not take effect"))
+        return True
+
+    def _refresh_monitors(self, reason):
+        log.info("%s, refreshing monitors", reason)
         self._save_settings()
 
         for overlay in self.overlays:
@@ -572,6 +642,7 @@ class FlexLuxApp(QWidget):
         self._poll_timer.stop()
         if any(self._hw_capable):
             self._poll_timer.start()
+        self._schedule_redetect_retry()
         self._gamma_timer.stop()
         if self._gamma is not None:
             self._gamma_timer.start()
@@ -650,8 +721,14 @@ class FlexLuxApp(QWidget):
 
     def _set_hardware_brightness(self, value, display):
         """Set hardware brightness (0-100) using the platform-appropriate backend."""
-        if self._backend:
-            self._backend.set_brightness(value, display=display)
+        if not self._backend:
+            return
+        if display in self._hw_read and abs(value - self._hw_read[display]) > self._POLL_THRESHOLD:
+            now = time.monotonic()
+            check = self._hw_write_check.get(display)
+            if check is None or now - check[1] > self._WRITE_CHECK_WINDOW_S:
+                self._hw_write_check[display] = (self._hw_read[display], now)
+        self._backend.set_brightness(value, display=display)
 
     def _get_hardware_brightness(self, display):
         """Read current hardware brightness (0-100), or None if unavailable."""
@@ -696,9 +773,18 @@ class FlexLuxApp(QWidget):
             actual = self._get_hardware_brightness(name)
             if actual is None:
                 continue
+            self._hw_read[name] = actual
             expected = self._expected_hw_from_slider(i)
             if abs(actual - expected) <= self._POLL_THRESHOLD:
+                self._hw_write_check.pop(name, None)
                 continue
+
+            check = self._hw_write_check.get(name)
+            if (check is not None and time.monotonic() - check[1] <= self._WRITE_CHECK_WINDOW_S
+                    and abs(actual - check[0]) <= self._POLL_THRESHOLD
+                    and self._redetect_after_failed_write(i)):
+                return
+            self._hw_write_check.pop(name, None)
 
             new_slider = self._slider_from_hw(actual)
             log.info("External brightness change on %s: expected hw=%d, actual=%d, slider -> %d",
@@ -797,6 +883,13 @@ class FlexLuxApp(QWidget):
     # Hardware brightness lags scheduled writes, so polling ignores
     # differences for this long after one rather than calling them manual.
     _SCHEDULE_POLL_GRACE_S = 10
+    _SCREEN_CHECK_INTERVAL_MS = 3000
+    _REDETECT_RETRY_MS = 30000
+    _REDETECT_MAX_ATTEMPTS = 10
+    # A reading within this long of FlexLux's write that still shows the
+    # brightness from before it means the write went nowhere.
+    _WRITE_CHECK_WINDOW_S = 30
+    _FAILED_WRITE_REDETECT_COOLDOWN_S = 60
     # Matches the Govee light: winds down 8 PM to midnight, wakes 10-11 AM.
     _SCHEDULE_DEFAULT = DailySchedule(20 * 60, 0, 10 * 60, 11 * 60)
     _SCHEDULE_DEFAULT_NIGHT_WARMTH = 36  # 2500K
@@ -1335,6 +1428,9 @@ class FlexLuxApp(QWidget):
         if hasattr(self, '_schedule_timer'):
             self._schedule_timer.stop()
         self._slew_timer.stop()
+        self._screen_check_timer.stop()
+        self._redetect_timer.stop()
+        self._refresh_timer.stop()
         if self._gamma is not None:
             self._gamma.restore()
         if hasattr(self, '_backend') and self._backend:

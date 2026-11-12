@@ -25,6 +25,12 @@ def setup_logging():
     fh.setFormatter(fmt)
     logger.addHandler(fh)
 
+    # screen_brightness_control reports failed DDC/CI reads and writes only on
+    # its own logger instead of raising.
+    sbc_logger = logging.getLogger("screen_brightness_control")
+    sbc_logger.setLevel(logging.WARNING)
+    sbc_logger.addHandler(fh)
+
     sh = logging.StreamHandler()
     sh.setLevel(logging.WARNING)
     sh.setFormatter(fmt)

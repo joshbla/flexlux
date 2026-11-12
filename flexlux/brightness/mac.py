@@ -326,6 +326,11 @@ class MacBrightnessBackend:
             return False
         return d['method'] is not None
 
+    def hardware_probe_failed(self, display_name):
+        # Detection already waits for the DDC/CI probe; retrying would not
+        # make m1ddc appear.
+        return False
+
     def get_display_bounds(self, display_name):
         """Return (x, y, w, h) in points for the named display, or None."""
         d = self._find_display(display_name)

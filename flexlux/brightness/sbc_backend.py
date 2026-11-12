@@ -1,4 +1,5 @@
 import logging
+import platform
 import threading
 from collections import Counter
 from typing import Optional
@@ -6,6 +7,11 @@ from typing import Optional
 import screen_brightness_control as sbc
 
 log = logging.getLogger("FlexLux")
+
+# Read attempts for the startup probe of a Windows DDC/CI monitor. sbc's
+# default of 50 takes seconds on a blocked bus; a working monitor answers on
+# the first or second try.
+_PROBE_VCP_TRIES = 5
 
 # Keys that sbc.Display.from_dict reads off the info dict. Some backends (e.g.
 # the Linux DDCUtil method) omit a few of these when the monitor does not report
@@ -117,6 +123,9 @@ class SbcBrightnessBackend:
         # name -> sbc.Display for the exact physical display. Populated by
         # list_monitors(); None means "not yet enumerated (or enumeration failed)".
         self._displays: dict = {}
+        # Names whose display answered a brightness read when enumerated.
+        # Only these get hardware control; the rest are dimmed by overlay.
+        self._responsive: set = set()
         self._names: Optional[list] = None
         self._worker = _BrightnessWorker()
 
@@ -168,15 +177,40 @@ class SbcBrightnessBackend:
                 seen_count[base] = 1
                 unique = base
             names.append(unique)
-            displays[unique] = sbc.Display.from_dict(self._normalize_info(info))
+            display = sbc.Display.from_dict(self._normalize_info(info))
+            displays[unique] = display
+            if self._probe(unique, display):
+                self._responsive.add(unique)
         return names, displays
+
+    @staticmethod
+    def _probe(name, display) -> bool:
+        """Read the display's brightness once, so a control that does not
+        answer (blocked DDC/CI, a screen that is off) is never offered."""
+        method = display.method.__name__
+        try:
+            if platform.system() == "Windows" and method == "VCP":
+                values = display.method.get_brightness(display=display.index, max_tries=_PROBE_VCP_TRIES)
+            else:
+                values = display.method.get_brightness(display=display.index)
+        except Exception as e:
+            log.info("Hardware brightness unavailable for %s via %s #%s: %s", name, method, display.index, e)
+            return False
+        if not values:
+            log.info("Hardware brightness unavailable for %s via %s #%s: no reading", name, method, display.index)
+            return False
+        log.info("Hardware brightness for %s via %s #%s (now %s)", name, method, display.index, values[0])
+        return True
 
     def has_hardware_control(self, display_name) -> bool:
         # If list_monitors() has not run yet (or returned nothing) there is no
         # hardware control available for the caller's name; report that honestly
         # rather than triggering enumeration here, where an exception would not be
         # caught by the caller.
-        return display_name in self._displays
+        return display_name in self._responsive
+
+    def hardware_probe_failed(self, display_name) -> bool:
+        return display_name in self._displays and display_name not in self._responsive
 
     def get_display_bounds(self, display_name):
         # sbc exposes brightness methods only; it does not report a monitor's
