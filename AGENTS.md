@@ -30,7 +30,7 @@ The app starts as a **system tray icon** — it does not open a visible window b
 
 ### Hardware brightness caveat (DDC/CI)
 
-Hardware brightness requires an unbroken DDC/CI path over the video cable. KVM switches and budget USB-C hubs commonly drop DDC/CI (the monitor still appears by name, but commands fail), leaving the app overlay-only for that display. The monitor's USB upstream port is not a workaround — it carries no brightness control. The primary dev machine deliberately runs a one-cable USB-C hub setup, so external hardware brightness is expected to be unavailable there; do not chase this as a bug.
+Hardware brightness requires an unbroken DDC/CI path over the video cable. KVM switches and budget USB-C hubs commonly drop DDC/CI (the monitor still appears by name, but commands fail), leaving the app overlay-only for that display. Some links relay writes but corrupt replies; the macOS backend then sets brightness without reading it back. The monitor's USB upstream port is not a workaround — it carries no brightness control. The primary Mac reaches the LG 27GN950 through an HDMI KVM switch. From the laptop's own HDMI port, writes work and reads are garbage. Its usual one-cable USB-C hub (MegaChips HDMI converter) blocks DDC/CI entirely, so external hardware brightness is expected to be unavailable while video goes through that hub; do not chase this as a bug. See the README's KVM troubleshooting section for the tested paths.
 
 ### Linting
 

@@ -164,11 +164,18 @@ If brightness control doesn't work:
 
 Hardware brightness uses DDC/CI, which travels over the video cable itself. Many KVM switches and budget USB-C hubs/docks pass the monitor's identity (EDID) but drop DDC/CI traffic, so the display still appears by name while brightness commands fail. The symptom is that the hardware side of the slider is unavailable and only the artificial darkening overlay works.
 
-- On macOS, you can confirm this with `m1ddc`: run `m1ddc display list` to find the display index, then `m1ddc get luminance -d <index>`. A "DDC communication failure" error while the monitor is listed means something in the video path is blocking DDC/CI.
+- On macOS, you can confirm this with `m1ddc`: run `m1ddc display list` to find the display number, then `m1ddc display <number> get luminance`. A "DDC communication failure" error while the monitor is listed means something in the video path is blocking DDC/CI.
+- Some links relay brightness changes but corrupt the monitor's replies, so reads return a different, often impossible, value each time. FlexLux detects this at startup: it still offers hardware brightness but stops reading it back, so brightness changed with the monitor's own buttons is not reflected in the slider.
 - Connecting the monitor's USB upstream port does not help. It only enables the monitor's built-in USB ports, vendor lighting software, and firmware updates — brightness control does not travel over USB.
 - Fixes: connect the video cable directly to the computer, use a Thunderbolt dock (which tunnels native DisplayPort, including DDC/CI), or use a KVM/hub that explicitly supports DDC/CI passthrough.
 
-Confirmed with an LG 27GN950: DDC/CI fails through both a KVM switch and a GenesysLogic-based USB-C hub, on the same setup where the monitor is otherwise detected correctly.
+Tested with an LG 27GN950 and an HDMI KVM switch:
+
+- A MacBook Pro's video through a GenesysLogic-based USB-C hub into the KVM: DDC/CI fails. The hub was the blocker.
+- The MacBook Pro's own HDMI port into the KVM: brightness changes work, but reads return garbage.
+- A Windows PC through the same KVM: LG OnScreen Control reads and sets brightness, with the monitor's USB cable unplugged.
+- The MacBook Pro directly to the monitor's DisplayPort input: reads and writes both work.
+- The monitor's USB connection exposes only LG's lighting and firmware channels; it sent nothing when brightness changed, and LG's apps use it only for lighting. See [docs/lg-27gn950-usb.md](docs/lg-27gn950-usb.md).
 
 ## License
 

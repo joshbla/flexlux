@@ -16,10 +16,12 @@
 
 - Windows/Linux: monitors are matched to screens by list order because the sbc backend reports no display bounds, so dimming one monitor's slider can darken a different screen. This positional mapping is also a hidden fallback in the overlay setup.
 - macOS: "Launch at Startup" saved the App Translocation path when the app was first run from a quarantined download, so login launch silently failed (launchd exit 78). Write a stable path or refuse to enable autostart while translocated.
-- macOS: when launched at login, m1ddc is not found because launchd's PATH excludes `/opt/homebrew/bin`, so external hardware brightness is unavailable until FlexLux is relaunched from a shell. The login-launched app logged no DDC/CI probe at all.
 - macOS: the brightness-key interceptor logs to `flexlux.brightness.mac_keys` instead of the `FlexLux` logger, so its start/failure messages never reach `FlexLux.log`.
 
 ## Investigate
+
+- Decide whether FlexLux should control the LG 27GN950's rear lighting over its USB connection, using the protocol OpenRGB already decoded. See [docs/lg-27gn950-usb.md](docs/lg-27gn950-usb.md).
+- macOS: verify the unreliable-read handling on the LG 27GN950 through the HDMI KVM (laptop HDMI port or a replacement hub): FlexLux should offer hardware brightness and set it, without the slider jumping. Logic checked only against a monitor whose DDC/CI is fully blocked.
 
 - macOS: running from source (Python 3.14, Qt 5.15.19) crashes with SIGTRAP after the event loop exits, with or without the background-worker change. Determine whether the packaged app also crashes on Quit.
 - `logging_setup.py` uses default-value fallbacks for `LOCALAPPDATA` and `XDG_DATA_HOME`; decide whether to keep the XDG spec default and require `LOCALAPPDATA` explicitly.

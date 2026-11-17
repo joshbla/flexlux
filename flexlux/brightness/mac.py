@@ -1,10 +1,21 @@
 import ctypes
+import os
 import subprocess
 import shutil
 import threading
 import logging
 
 log = logging.getLogger("FlexLux")
+
+# Apps launched at login inherit launchd's minimal PATH, which excludes
+# Homebrew, so m1ddc is also looked up in Homebrew's install locations.
+_HOMEBREW_BIN_DIRS = ('/opt/homebrew/bin', '/usr/local/bin')
+
+# Reads per display when probing. A link that relays DDC/CI writes but
+# corrupts replies (seen through an HDMI KVM switch) returns a different
+# value on each read, so agreeing reads are required before trusting them.
+_PROBE_READS = 3
+_PROBE_READ_TIMEOUT_S = 2
 
 
 class _CGPoint(ctypes.Structure):
@@ -41,9 +52,9 @@ class _CoalescingDdcWriter:
             target=self._run, name="flexlux-ddc-writer", daemon=True)
         self._thread.start()
 
-    def submit(self, m1ddc_idx, value):
+    def submit(self, uuid, value):
         with self._cond:
-            self._pending[m1ddc_idx] = value
+            self._pending[uuid] = value
             self._cond.notify()
 
     def stop(self):
@@ -60,12 +71,11 @@ class _CoalescingDdcWriter:
                     self._cond.wait()
                 if not self._pending and self._stop_requested:
                     return
-                idx, value = self._pending.popitem()
+                uuid, value = self._pending.popitem()
             try:
                 with self._ddc_lock:
                     subprocess.run(
-                        [self._m1ddc, 'set', 'luminance', str(int(value)),
-                         '-d', str(idx)],
+                        [self._m1ddc, 'display', uuid, 'set', 'luminance', str(int(value))],
                         capture_output=True, timeout=2)
             except Exception as e:
                 log.warning("m1ddc brightness set failed: %s", e)
@@ -111,7 +121,12 @@ class MacBrightnessBackend:
         except (OSError, AttributeError) as e:
             log.warning("DisplayServices not available: %s", e)
 
-        self._m1ddc = shutil.which('m1ddc')
+        search_path = os.pathsep.join((os.environ['PATH'],) + _HOMEBREW_BIN_DIRS)
+        self._m1ddc = shutil.which('m1ddc', path=search_path)
+        if self._m1ddc is None:
+            log.info("m1ddc not found; external displays have no hardware brightness")
+        else:
+            log.info("Using m1ddc at %s", self._m1ddc)
         self._m1ddc_info = {}
         if self._m1ddc is not None:
             self._parse_m1ddc_display_list()
@@ -180,21 +195,48 @@ class MacBrightnessBackend:
                 return idx, info
         return None, {}
 
-    def _probe_ddc(self, display):
-        """Probe one display for DDC/CI luminance support (blocking)."""
-        m1ddc_idx = display['m1ddc_idx']
+    def _read_luminance(self, uuid, timeout):
+        """Run one m1ddc luminance read. Returns the reported integer, which
+        may be out of range on a corrupting link, or None if m1ddc failed."""
+        result = subprocess.run(
+            [self._m1ddc, 'display', uuid, 'get', 'luminance'],
+            capture_output=True, timeout=timeout, text=True)
+        if result.returncode != 0:
+            return None
         try:
-            probe = subprocess.run(
-                [self._m1ddc, 'get', 'luminance', '-d', str(m1ddc_idx)],
-                capture_output=True, timeout=3, text=True)
-            if probe.returncode == 0 and probe.stdout.strip().isdigit():
-                display['method'] = 'm1ddc'
-                log.info("DDC/CI available for %s (m1ddc #%d)", display['name'], m1ddc_idx)
-            else:
-                log.info("DDC/CI unavailable for %s (m1ddc #%d, rc=%d)",
-                         display['name'], m1ddc_idx, probe.returncode)
+            return int(result.stdout.strip())
+        except ValueError:
+            return None
+
+    def _probe_ddc(self, display):
+        """Probe one display for DDC/CI luminance support (blocking).
+
+        Any successful reply means DDC/CI reaches the monitor, so writes are
+        offered. Readings are trusted only when every probe read agrees on an
+        in-range value; otherwise polling skips the display rather than move
+        its slider to garbage.
+        """
+        readings = []
+        try:
+            for _ in range(_PROBE_READS):
+                value = self._read_luminance(display['uuid'], _PROBE_READ_TIMEOUT_S)
+                if value is not None:
+                    readings.append(value)
+        except subprocess.TimeoutExpired:
+            log.info("DDC/CI probe timed out for %s", display['name'])
         except Exception as e:
             log.info("DDC/CI probe failed for %s: %s", display['name'], e)
+        if not readings:
+            log.info("DDC/CI unavailable for %s (m1ddc #%d)", display['name'], display['m1ddc_idx'])
+            return
+        display['readable'] = (len(readings) == _PROBE_READS and len(set(readings)) == 1
+                               and 0 <= readings[0] <= 100)
+        display['method'] = 'm1ddc'
+        if display['readable']:
+            log.info("DDC/CI available for %s (m1ddc #%d)", display['name'], display['m1ddc_idx'])
+        else:
+            log.info("DDC/CI available for %s (m1ddc #%d) but readings are unreliable %s; "
+                     "brightness is set but not read back", display['name'], display['m1ddc_idx'], readings)
 
     def _detect_displays(self):
         max_displays = 16
@@ -249,21 +291,22 @@ class MacBrightnessBackend:
                 'uuid': uuid,
                 'm1ddc_idx': m1ddc_idx,
                 'mirrored': display_id in mirrored_ids,
+                'readable': is_builtin,
             }
             self._displays.append(display)
-            if not is_builtin and self._m1ddc is not None and m1ddc_idx is not None:
+            if not is_builtin and self._m1ddc is not None and uuid is not None:
                 probe_targets.append(display)
 
-        # Probe DDC/CI support for all externals concurrently: each probe is a
-        # blocking subprocess with a 3s timeout, so probing serially would
-        # stall app launch by up to 3s per display.
+        # Probe DDC/CI support for all externals concurrently: each probe runs
+        # blocking subprocesses, so probing serially would stall app launch
+        # by the probe time of every display.
         if probe_targets:
             threads = [threading.Thread(target=self._probe_ddc, args=(d,))
                        for d in probe_targets]
             for t in threads:
                 t.start()
             for t in threads:
-                t.join(timeout=4)
+                t.join(timeout=_PROBE_READS * _PROBE_READ_TIMEOUT_S + 1)
 
     def _dedupe_display_names(self):
         """Ensure display names are unique so name-based lookups are unambiguous.
@@ -352,9 +395,9 @@ class MacBrightnessBackend:
                 target['id'], ctypes.c_float(brightness))
             if kr != 0:
                 log.warning("DisplayServicesSetBrightness returned %d", kr)
-        elif target['method'] == 'm1ddc' and target['m1ddc_idx'] is not None:
+        elif target['method'] == 'm1ddc':
             if self._ddc_writer is not None:
-                self._ddc_writer.submit(target['m1ddc_idx'], value)
+                self._ddc_writer.submit(target['uuid'], value)
 
     def get_brightness(self, display=None):
         """Get current brightness (0-100), or None on failure."""
@@ -369,17 +412,15 @@ class MacBrightnessBackend:
             if kr == 0:
                 return int(round(brightness.value * 100))
             return None
-        elif target['method'] == 'm1ddc' and target['m1ddc_idx'] is not None:
+        elif target['method'] == 'm1ddc' and target['readable']:
             # Non-blocking lock attempt: if the writer is mid-set, skip this
             # poll rather than stalling the UI thread waiting on the DDC bus.
             if not self._ddc_lock.acquire(blocking=False):
                 return None
             try:
-                result = subprocess.run(
-                    [self._m1ddc, 'get', 'luminance', '-d', str(target['m1ddc_idx'])],
-                    capture_output=True, timeout=3, text=True)
-                if result.returncode == 0 and result.stdout.strip().isdigit():
-                    return int(result.stdout.strip())
+                value = self._read_luminance(target['uuid'], 3)
+                if value is not None and 0 <= value <= 100:
+                    return value
             except Exception as e:
                 log.warning("m1ddc brightness get failed: %s", e)
             finally:
