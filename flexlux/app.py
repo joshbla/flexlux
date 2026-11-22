@@ -10,6 +10,7 @@ from PyQt5.QtCore import Qt, QEvent, QTimer, QSettings, QTime, QLocale
 from flexlux import VERSION
 from flexlux.brightness import get_backend, get_key_interceptor
 from flexlux.gamma import get_gamma_controller, warmth_rgb, warmth_kelvin
+from flexlux.mac_typing import PanelTyping
 from flexlux.overlay import OverlayWindow
 from flexlux.platform_ui import get_ui_config
 from flexlux.schedule import (DailySchedule, DAY, WIND_DOWN, NIGHT, WAKE_UP, scheduled_warmth,
@@ -77,6 +78,9 @@ class FlexLuxApp(QWidget):
     def __init__(self):
         super().__init__()
         self._ui = get_ui_config()
+        self._panel_typing = None
+        if self._ui.panel_needs_typing_help:
+            self._panel_typing = PanelTyping(self)
         self.max_brightness = 100
         self.settings = QSettings("FlexLux", "FlexLux")
         self._save_timer = QTimer()
@@ -549,14 +553,15 @@ class FlexLuxApp(QWidget):
         layout.addStretch(1)
         return page
 
-    @staticmethod
-    def _make_time_edit(accessible_name):
+    def _make_time_edit(self, accessible_name):
         edit = QTimeEdit()
         edit.setDisplayFormat(QLocale.system().timeFormat(QLocale.ShortFormat))
         edit.setButtonSymbols(QAbstractSpinBox.NoButtons)
         edit.setAlignment(Qt.AlignCenter)
         edit.setStyleSheet(_TIME_EDIT_STYLE)
         edit.setAccessibleName(accessible_name)
+        if self._panel_typing is not None:
+            self._panel_typing.watch(edit.lineEdit())
         return edit
 
     def _clear_layout(self, layout):
@@ -1390,6 +1395,8 @@ class FlexLuxApp(QWidget):
         # click, focus-loss hide), keeping poll speed and the reopen guard
         # consistent no matter how the panel was dismissed.
         self._last_hide_time = time.monotonic()
+        if self._panel_typing is not None:
+            self._panel_typing.release()
         self._set_poll_speed(fast=False)
         self._pages.setCurrentIndex(0)
         # Discard schedule times left out of order; the saved ones still apply.

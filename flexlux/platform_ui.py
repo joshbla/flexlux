@@ -12,6 +12,8 @@ class PlatformUIConfig:
     panel_top_offset: int
     use_event_filter: bool
     use_manual_tray_menu: bool
+    # The panel can't take typing on its own; see mac_typing.
+    panel_needs_typing_help: bool
 
 
 _MACOS = PlatformUIConfig(
@@ -27,6 +29,7 @@ _MACOS = PlatformUIConfig(
     panel_top_offset=30,
     use_event_filter=False,
     use_manual_tray_menu=True,
+    panel_needs_typing_help=True,
 )
 
 _WINDOWS = PlatformUIConfig(
@@ -36,6 +39,7 @@ _WINDOWS = PlatformUIConfig(
     panel_top_offset=30,
     use_event_filter=True,
     use_manual_tray_menu=False,
+    panel_needs_typing_help=False,
 )
 
 _LINUX = PlatformUIConfig(
@@ -45,6 +49,7 @@ _LINUX = PlatformUIConfig(
     panel_top_offset=30,
     use_event_filter=True,
     use_manual_tray_menu=False,
+    panel_needs_typing_help=False,
 )
 
 
